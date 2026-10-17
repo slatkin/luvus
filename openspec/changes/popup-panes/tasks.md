@@ -41,7 +41,7 @@
 
 ## 6. Persistence
 
-- [ ] 6.1 Save `tiled_focus` as the tab focus in `snapshot_layout`, and keep the snapshot on `to_tree()` and `leaves()` so that floating panes are never written. Verify with a persist test for "Restart with a floating pane open", and a test that an old snapshot loads unchanged.
+- [x] 6.1 Save `tiled_focus` as the tab focus in `snapshot_layout`, and keep the snapshot on `to_tree()` and `leaves()` so that floating panes are never written. Verify with a persist test for "Restart with a floating pane open", and a test that an old snapshot loads unchanged.
 
 ## 7. Integration checks
 

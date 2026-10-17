@@ -5596,14 +5596,41 @@ impl App {
     /// Split the focused pane and follow the newly attached sibling.
     fn split(&mut self, axis: Axis) {
         let pane = self.layout().focus;
+        if self.reject_tiled_only_floating(pane) {
+            return;
+        }
         let _ = self.split_pane(pane, axis, true);
     }
 
     /// Split the focused pane along its longer side.
     fn split_auto(&mut self) {
         let pane = self.layout().focus;
+        if self.reject_tiled_only_floating(pane) {
+            return;
+        }
         let axis = self.auto_split_axis_for(pane);
         let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Whether `pane` is floating in its tab.
+    fn is_floating_pane(&self, pane: PaneId) -> bool {
+        self.pane_location(pane).is_some_and(|(workspace, tab)| {
+            self.workspaces
+                .get(workspace)
+                .and_then(|workspace| workspace.tabs.get(tab))
+                .is_some_and(|tab| tab.layout.is_floating(pane))
+        })
+    }
+
+    /// Tiled-only commands have no tree geometry to act on when `pane` floats,
+    /// so they explain the rejection instead of quietly editing the tile behind
+    /// the floating pane. Returns `true` when the caller must stop.
+    fn reject_tiled_only_floating(&mut self, pane: PaneId) -> bool {
+        if self.is_floating_pane(pane) {
+            self.show_toast(self.catalog.floating_tiled_only);
+            return true;
+        }
+        false
     }
 
     /// Has an interactive client painted a usable pane area yet? Automatic splits
@@ -5911,7 +5938,13 @@ impl App {
 
     /// Transpose only the target pane's parent split without changing focus,
     /// zoom, terminal lifetime, or any other tab.
+    ///
+    /// A floating pane has no tree split to transpose, so this changes nothing
+    /// and returns `None`; the UI caller shows the tiled-only notice.
     pub(crate) fn transpose_pane(&mut self, pane: PaneId) -> Option<bool> {
+        if self.is_floating_pane(pane) {
+            return None;
+        }
         let (workspace, tab) = self.pane_location(pane)?;
         let target = &mut self.workspaces[workspace].tabs[tab];
         if !target.is_renameable() {
@@ -8197,7 +8230,9 @@ impl App {
         if let Some(tg) = tab_hit {
             if let Some(pane) = self.pane_menu.as_ref().map(|m| m.pane) {
                 self.pane_menu = None;
-                let _ = self.move_pane_to_tab(pane, tg);
+                if self.move_pane_to_tab(pane, tg) == Err(PaneMoveError::FloatingPane) {
+                    self.show_toast(self.catalog.floating_tiled_only);
+                }
             }
             return;
         }
@@ -8234,6 +8269,9 @@ impl App {
         // Transpose resolves the stable menu target globally and preserves focus,
         // including after a background request has moved or closed that pane.
         if item == PaneMenuItem::Transpose {
+            if self.reject_tiled_only_floating(pane) {
+                return;
+            }
             self.transpose_pane(pane);
             return;
         }
@@ -9715,6 +9753,9 @@ impl App {
     /// Enter keyboard resize mode (RESIZE-3) — a no-op with nothing to resize.
     fn enter_resize_mode(&mut self) {
         if self.active_is_git() || self.active_is_orch() || self.layout().len() < 2 {
+            return;
+        }
+        if self.reject_tiled_only_floating(self.layout().focus) {
             return;
         }
         self.mode = Mode::Resize;
@@ -17174,6 +17215,55 @@ fi
         app.close_pane(pane);
         app.pane_menu_action(PaneMenuItem::Transpose);
         assert_eq!(app.layout().focus, focus);
+    }
+
+    #[test]
+    fn pane_menu_tiled_only_actions_notice_a_floating_pane() {
+        let _env = crate::persist::test_env("pane-menu-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let tree = serde_json::to_vec(&app.layout().to_tree()).unwrap();
+        let leaves = app.layout().leaves();
+        let panes = app.panes.len();
+        let notice = app.catalog.floating_tiled_only;
+
+        for item in [
+            PaneMenuItem::SplitVertical,
+            PaneMenuItem::SplitHorizontal,
+            PaneMenuItem::Transpose,
+        ] {
+            app.toast = None;
+            app.open_pane_menu(floating, 6, 6);
+            assert!(app.pane_menu.is_some(), "{item:?} menu opens");
+            app.pane_menu_action(item);
+            assert_eq!(
+                serde_json::to_vec(&app.layout().to_tree()).unwrap(),
+                tree,
+                "{item:?} leaves the tiled tree alone"
+            );
+            assert_eq!(app.layout().leaves(), leaves, "{item:?} adds no tile");
+            assert_eq!(app.panes.len(), panes, "{item:?} spawns no pane");
+            assert_eq!(app.layout().focus, floating, "{item:?} keeps focus");
+            assert_eq!(
+                app.toast.as_ref().map(|(text, _)| text.as_str()),
+                Some(notice),
+                "{item:?} shows the tiled-only notice"
+            );
+        }
+
+        // The resize-mode entry point is tiled-only too, even when a caller
+        // bypasses the prefix command that normally opens it.
+        app.toast = None;
+        app.enter_resize_mode();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some(notice)
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@
 - [x] 4.3 Add `floating`, and for floating panes `rect` and `z`, to `pane.list`, `pane.get`, `pane.current` and `pane.status`. Verify with a dispatch test for "List a tab with a floating pane".
 - [x] 4.4 Add `luvus pane float [<id>] [--width N] [--height N] [--x N] [--y N] [--title T] [--no-focus] [-- <cmd...>]` to `src/cli.rs`, with compact help, focused `pane float --help`, and localized text in `src/i18n/cli.rs`. Verify with parser tests for every flag, the positional ID, pass-through argv after `--`, and duplicate or invalid flags.
 - [x] 4.5 Add `pane.float` to `src/api/capabilities.rs` and `protocol/uhp/v1/schema/`, add the optional pane fields to the schema, and update the UHP fixtures. Verify with the UHP fixture and conformance tests.
-- [ ] 4.6 Document `pane float`, the new pane fields, and the `layout.apply` and `pane.layout` behavior with floating panes in `website/src/content/docs/docs/reference/cli.mdx` and `website/src/content/docs/docs/uhp/methods.mdx`. Update `skills/luvus/`, `plugins/luvus/skills/luvus/` and `website/public/agent-readme.md` for the automation workflow. Verify that `cargo run --quiet -- help pane` matches the documented usage.
+- [x] 4.6 Document `pane float`, the new pane fields, and the `layout.apply` and `pane.layout` behavior with floating panes in `website/src/content/docs/docs/reference/cli.mdx` and `website/src/content/docs/docs/uhp/methods.mdx`. Update `skills/luvus/`, `plugins/luvus/skills/luvus/` and `website/public/agent-readme.md` for the automation workflow. Verify that `cargo run --quiet -- help pane` matches the documented usage.
 
 ## 5. Modules
 

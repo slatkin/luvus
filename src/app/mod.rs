@@ -5376,6 +5376,18 @@ impl App {
         &ws.tabs[ws.active_tab].layout
     }
 
+    /// The explicit title a floating pane was created with in the active tab.
+    /// Floating panes of other tabs are never drawn, so only the active tab
+    /// needs to answer.
+    pub(crate) fn floating_title(&self, id: PaneId) -> Option<&str> {
+        let ws = self.workspaces.get(self.active_ws)?;
+        ws.tabs
+            .get(ws.active_tab)?
+            .floating_titles
+            .get(&id)
+            .map(String::as_str)
+    }
+
     fn layout_mut(&mut self) -> &mut TileLayout {
         let ws = &mut self.workspaces[self.active_ws];
         let at = ws.active_tab;
@@ -5833,6 +5845,25 @@ impl App {
             self.focus_location(workspace, tab, pane_id);
         }
         Ok(())
+    }
+
+    /// Clamp every stored floating rect of the active tab into `area`, given in
+    /// pane-area coordinates.
+    ///
+    /// Only an interactive render calls this: it is the tmux resize clamp and it
+    /// changes server-owned geometry. A passive client clamps the copy it draws
+    /// instead, so a smaller viewport never moves shared panes.
+    pub(crate) fn clamp_stored_floating_rects(&mut self, area: Rect) {
+        if self.workspaces.is_empty() {
+            return;
+        }
+        let layout = self.layout_mut();
+        for (id, rect) in layout.floating_rects() {
+            let clamped = crate::layout::clamp_floating_rect(rect, area);
+            if clamped != rect {
+                layout.set_floating_rect(id, clamped);
+            }
+        }
     }
 
     /// Create a floating pane in the tab that owns the target pane, or in the

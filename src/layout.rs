@@ -248,6 +248,14 @@ impl TileLayout {
         self.floating.push((id, rect));
     }
 
+    /// Replace the stored rect of a floating pane without changing its stacking
+    /// order. Unknown or tiled IDs are ignored.
+    pub fn set_floating_rect(&mut self, id: PaneId, rect: Rect) {
+        if let Some(entry) = self.floating.iter_mut().find(|(pane, _)| *pane == id) {
+            entry.1 = rect;
+        }
+    }
+
     /// Move a floating pane to the top of the stack. Returns `false` when the
     /// pane is not floating.
     pub fn raise(&mut self, id: PaneId) -> bool {
@@ -1388,6 +1396,32 @@ mod tests {
         assert!(layout.contains(second));
         assert_eq!(layout.all_panes(), vec![a, b, third, second]);
         assert_eq!(layout.leaves(), vec![a, b]);
+    }
+
+    #[test]
+    fn set_floating_rect_keeps_the_stacking_order() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let (bottom, top) = (PaneId::alloc(), PaneId::alloc());
+        layout.add_floating(bottom, Rect::new(0, 0, 20, 8));
+        layout.add_floating(top, Rect::new(4, 2, 20, 8));
+
+        let moved = Rect::new(1, 1, 12, 6);
+        layout.set_floating_rect(bottom, moved);
+        assert_eq!(
+            layout.floating_rects(),
+            vec![(top, Rect::new(4, 2, 20, 8)), (bottom, moved)],
+            "the updated pane keeps its place at the bottom of the stack"
+        );
+
+        let before = layout.floating_rects();
+        layout.set_floating_rect(a, moved);
+        layout.set_floating_rect(PaneId(999), moved);
+        assert_eq!(
+            layout.floating_rects(),
+            before,
+            "tiled and unknown IDs are ignored"
+        );
     }
 
     #[test]

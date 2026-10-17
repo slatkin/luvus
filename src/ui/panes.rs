@@ -8,6 +8,11 @@ use super::*;
 /// lifetime ID remains visible and addressable. Path visibility is a separate
 /// presentation choice shared by both renderers.
 fn terminal_pane_title(app: &App, id: PaneId, cwd: &Path, max_width: u16) -> String {
+    // A floating pane shows the title its create request gave, else the title a
+    // tiled pane with the same command would show.
+    if let Some(title) = app.floating_title(id) {
+        return truncate(title, max_width as usize);
+    }
     let identity = app
         .agent_name_for(id)
         .map(ToOwned::to_owned)
@@ -318,6 +323,9 @@ fn project_hover_file_hyperlink(
     }
 }
 
+/// A rendered terminal cursor: (column, row, visible).
+pub(super) type PaneCursor = Option<(u16, u16, bool)>;
+
 pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -325,7 +333,7 @@ pub(super) fn draw_panes(
     lone_header: bool,
     app: &mut App,
     t: &Theme,
-) -> Option<(u16, u16, bool)> {
+) -> PaneCursor {
     let focus = app.layout().focus;
     let mut cursor = None;
     let mut diff_source_rects = Vec::new();
@@ -355,6 +363,63 @@ pub(super) fn draw_panes(
     cursor
 }
 
+/// Draw the active tab's floating panes, bottom to top, above the tiled layer.
+///
+/// A floating pane covers whatever is under it, so each one clears its whole
+/// outer rect first, then paints content, border and title. Floating panes are
+/// ordinary PTY panes, so the diff/preview hit lists stay empty; terminal
+/// hyperlinks are appended to the ones the tiled pass already recorded.
+///
+/// Title hit rects come back in hit-test order (topmost first), so the caller
+/// can lead `App::pane_title_rects` with the panes drawn last.
+pub(super) fn draw_floating_panes(
+    f: &mut RenderTarget,
+    rects: &[(PaneId, Rect)],
+    focus: PaneId,
+    app: &mut App,
+    t: &Theme,
+) -> (PaneCursor, Vec<(PaneId, Rect)>) {
+    let show_titles = app.config.layout.show_titles;
+    let mut cursor = None;
+    let mut title_rects = Vec::new();
+    let mut diff_source_rects = Vec::new();
+    let mut diff_note_rects = Vec::new();
+    let mut preview_link_rects = Vec::new();
+    let mut rendered_hyperlinks = Vec::new();
+    {
+        let mut context = PaneRenderContext {
+            app,
+            lone_header: false,
+            diff_source_rects: &mut diff_source_rects,
+            diff_note_rects: &mut diff_note_rects,
+            preview_link_rects: &mut preview_link_rects,
+            rendered_hyperlinks: &mut rendered_hyperlinks,
+        };
+        for (id, rect) in rects {
+            // Clear border cells too: the pane below must not show through.
+            f.render_widget(Block::new().style(Style::new().bg(t.mantle)), *rect);
+            let focused = *id == focus;
+            if let Some(c) = draw_one_pane(f, *rect, *id, focused, true, &mut context, t) {
+                cursor = Some(c);
+            }
+            // A floating pane is always bordered, and its title sits on that
+            // border row whether or not the tiled layer is split.
+            borders::render_pane_borders(f, &[(*id, *rect)], focused.then_some(*id), None, t);
+            if show_titles {
+                title_rects.extend(draw_pane_titles(f, &[(*id, *rect)], focus, context.app, t));
+            }
+        }
+    }
+    app.diff_source_rects.extend(diff_source_rects);
+    app.diff_note_rects.extend(diff_note_rects);
+    app.preview_link_rects.extend(preview_link_rects);
+    app.rendered_hyperlinks.append(&mut rendered_hyperlinks);
+    app.rendered_hyperlinks
+        .sort_by_key(|link| (link.y, link.start, link.pane.0));
+    title_rects.reverse();
+    (cursor, title_rects)
+}
+
 /// Patch only terminal rows captured by the VT damage ledger into a retained
 /// client buffer. The caller has already proved that geometry and every
 /// non-terminal layer are unchanged. Any uncertainty returns `Err(())` and the
@@ -367,6 +432,12 @@ pub(super) fn patch_terminal_damage(
     hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
     let leaves = app.layout().leaves();
+    // A floating pane draws above the tiled layer, so a damaged tiled cell may be
+    // covered by it. Fall back to the full renderer until the damage path covers
+    // floating panes (task 3.5 of the popup-panes change).
+    if leaves.len() != app.layout().len() {
+        return Err(());
+    }
     if leaves.len() != content_rects.len()
         || leaves.iter().any(|id| app.views.contains_key(id))
         || leaves

@@ -21,9 +21,9 @@
 - [x] 3.1 Draw floating panes after tiled panes, from bottom to top, with a cleared rect, a border and a title (the `Tab.floating_titles` entry, else the normal pane title). Compute `bordered` from tiled rects only. Build `pane_rects` with floating panes first, from top to bottom. Verify with render tests for "New pane on top", "Explicit title", "Default title", and a lone tiled pane under a floating pane that stays borderless.
 - [x] 3.2 In the interactive render, clamp and store floating rects when the pane area changed, and resize floating PTYs from the content rect. In passive renders, clamp for drawing only. Verify with render tests for "Clamp on terminal resize" and "Smaller passive client" (the stored rect and PTY size do not change).
 - [x] 3.3 Under zoom, draw only `layout().focus` (tiled or floating) and hide the other floating panes. Unzoom restores the stored floating rect. Verify with render tests for "Zoom a tiled pane" and "Zoom a floating pane".
-- [ ] 3.4 Route every mouse path in `input.rs` through `pane_rects` or a floating-aware hit helper, so that the topmost pane gets clicks and scrolls and covered tiled cells get nothing. Verify with input tests for "Click on a floating pane", "Click on a visible tiled area" and "Scroll goes to the top pane".
-- [ ] 3.5 Make `patch_terminal_damage` (`src/ui/panes.rs:369`) compare `all_panes()` with `content_rects`, and return `Err(())` when a floating pane overlaps a damaged tiled cell. Verify with a damage-path test that patches a floating pane's output, and a test that falls back to the full render for an overlapped tiled pane.
-- [ ] 3.6 Verify "Tab switch with floating panes", "Keys go to the focused tiled pane" and "Prefix while floating pane focused" with app tests.
+- [x] 3.4 Route every mouse path in `input.rs` through `pane_rects` or a floating-aware hit helper, so that the topmost pane gets clicks and scrolls and covered tiled cells get nothing. Verify with input tests for "Click on a floating pane", "Click on a visible tiled area" and "Scroll goes to the top pane".
+- [x] 3.5 Make `patch_terminal_damage` (`src/ui/panes.rs:369`) compare `all_panes()` with `content_rects`, and return `Err(())` when a floating pane overlaps a damaged tiled cell. Verify with a damage-path test that patches a floating pane's output, and a test that falls back to the full render for an overlapped tiled pane.
+- [x] 3.6 Verify "Tab switch with floating panes", "Keys go to the focused tiled pane" and "Prefix while floating pane focused" with app tests.
 
 ## 4. API, CLI and UHP
 

@@ -240,7 +240,7 @@ modules (extensions):
                              <id> is a module id or the owner/repo it came from
   module actions             list every action across modules
   module run <id> <action>   invoke a module action (captures + logs output)
-  module pane open <id> <entrypoint> [--placement split|overlay|tab]
+  module pane open <id> <entrypoint> [--placement split|overlay|tab|floating]
   module pane focus <pane> | close <pane>
   module log [<id>]          tail module command logs (--limit N)
   module config-dir <id>     print/create a module's config dir
@@ -6190,6 +6190,18 @@ mod tests {
         let (m, p) = parse(&argv("luvus module enable my-mod")).unwrap();
         assert_eq!(m, "module.enable");
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("my-mod"));
+
+        let (m, p) = parse(&argv(
+            "luvus module pane open you.board board --placement floating",
+        ))
+        .unwrap();
+        assert_eq!(m, "module.pane.open");
+        assert_eq!(p.get("module").and_then(|v| v.as_str()), Some("you.board"));
+        assert_eq!(p.get("entrypoint").and_then(|v| v.as_str()), Some("board"));
+        assert_eq!(
+            p.get("placement").and_then(|v| v.as_str()),
+            Some("floating")
+        );
 
         let (m, _) = parse(&argv("luvus module")).unwrap();
         assert_eq!(m, "module.list");

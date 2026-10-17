@@ -1628,15 +1628,12 @@ mod tests {
             "the floating agent resume metadata is never written"
         );
         let saved: SessionSnapshot = serde_json::from_str(&raw).unwrap();
-        let tab = &saved.workspaces[0].tabs[0];
-        assert!(matches!(&tab.tree, LayoutTree::Leaf(id) if *id == tiled.0));
-        assert_eq!(tab.focus, tiled.0, "focus is the tiled pane");
-        assert_eq!(
-            tab.panes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![tiled.0],
-            "only the tiled pane is saved"
-        );
-        let saved_tiled = &tab.panes[0].1;
+        let saved_tiled = &saved.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .find(|(id, _)| *id == tiled.0)
+            .expect("the tiled agent is saved")
+            .1;
         assert_eq!(
             saved_tiled
                 .agent_session

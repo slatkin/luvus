@@ -101,6 +101,14 @@ pub(in crate::app::dispatch) fn workspace_update_error(
     }
 }
 
+/// The tiled-only pane commands share one rejection for a floating target.
+pub(in crate::app::dispatch) fn floating_pane_rejection() -> (String, String) {
+    (
+        "invalid_request".to_string(),
+        "pane is floating".to_string(),
+    )
+}
+
 pub(in crate::app::dispatch) fn floating_pane_error(err: FloatingPaneError) -> (String, String) {
     let (code, message) = match err {
         FloatingPaneError::PaneNotFound => ("not_found", "pane not found"),

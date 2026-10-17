@@ -192,10 +192,7 @@ impl App {
                 Some(_) => self.resolve_pane(p)?.ok_or_else(not_found)?,
             };
             if self.is_floating_pane(base) {
-                return Err((
-                    "invalid_request".to_string(),
-                    "pane is floating".to_string(),
-                ));
+                return Err(floating_pane_rejection());
             }
             let axis = split_axis(self, p, base)?;
             let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
@@ -215,8 +212,7 @@ impl App {
     /// Create a floating pane in the target pane's tab, or in the active tab
     /// when no target is given. Every parameter is validated before the app
     /// mutates state or spawns a PTY.
-    pub(super) fn api_pane_float(&mut self, method: &str, p: &Value) -> DispatchResult {
-        let _ = method;
+    pub(super) fn api_pane_float(&mut self, p: &Value) -> DispatchResult {
         reject_api_fields(
             p,
             &[
@@ -250,16 +246,6 @@ impl App {
             focus: floating_focus(p)?,
             command: floating_command(p)?,
         })
-    }
-
-    /// `pane.split` and `pane.float` both create a pane; one router arm serves
-    /// both placements and the method name picks the handler.
-    pub(super) fn api_pane_split_or_float(&mut self, method: &str, p: &Value) -> DispatchResult {
-        if method == "pane.float" {
-            self.api_pane_float(method, p)
-        } else {
-            self.api_pane_split(method, p)
-        }
     }
 
     pub(super) fn api_pane_move(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -1432,10 +1418,7 @@ impl App {
             reject_api_fields(p, &["pane", "direction", "cells"])?;
             let pane = self.resolve_pane_or_focus(p)?;
             if self.is_floating_pane(pane) {
-                return Err((
-                    "invalid_request".to_string(),
-                    "pane is floating".to_string(),
-                ));
+                return Err(floating_pane_rejection());
             }
             let direction = crate::api::topology::direction(p)?;
             let cells = p.get("cells").and_then(Value::as_i64).unwrap_or(1);
@@ -1538,10 +1521,7 @@ impl App {
             Some(value) => PaneId(parse_u32_value(value, "pane")?),
         };
         if self.is_floating_pane(pane) {
-            return Err((
-                "invalid_request".to_string(),
-                "pane is floating".to_string(),
-            ));
+            return Err(floating_pane_rejection());
         }
         let changed = self.transpose_pane(pane).ok_or_else(not_found)?;
         Ok(json!({"type":"pane_transpose","pane":pane.0.to_string(),"changed":changed}))
@@ -1562,10 +1542,7 @@ impl App {
                 "with",
             )?);
             if self.is_floating_pane(first) || self.is_floating_pane(second) {
-                return Err((
-                    "invalid_request".to_string(),
-                    "pane is floating".to_string(),
-                ));
+                return Err(floating_pane_rejection());
             }
             let first_location = self.pane_location(first).ok_or_else(not_found)?;
             let second_location = self.pane_location(second).ok_or_else(not_found)?;

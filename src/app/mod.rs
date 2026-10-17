@@ -5880,9 +5880,6 @@ impl App {
     /// spawn. The stored rect defaults to half the pane area by a quarter and
     /// cascades like tmux when a position is missing. A shell uses the same cwd
     /// candidates as a tiled split; an explicit command is an argv.
-    // Consumed by the `pane.float` dispatch task and the module floating
-    // placement task of the popup-panes change.
-    #[allow(dead_code)]
     pub(crate) fn float_pane(
         &mut self,
         request: FloatingPaneRequest,
@@ -9357,11 +9354,13 @@ impl App {
 
     fn set_focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
         // Zoom applies to the pane this client was looking at, so compare the
-        // departing pane (which may be in another tab) with the destination.
+        // departing pane (which may be in another tab) with the destination. A
+        // focus change to or from a floating pane unzooms the tab; a move
+        // between tiled panes keeps the current zoom behavior.
         let was_floating = self.layout().is_floating(self.layout().focus);
         self.set_tab_focus(workspace, tab, id);
         let is_floating = self.workspaces[workspace].tabs[tab].layout.is_floating(id);
-        if was_floating != is_floating {
+        if was_floating || is_floating {
             self.zoomed = false;
         }
         self.active_ws = workspace;
@@ -21944,7 +21943,36 @@ fi
     }
 
     #[test]
-    fn creating_a_floating_pane_with_a_command_keeps_the_tiled_layout() {
+    fn focus_between_floating_panes_while_zoomed_unzooms() {
+        let _env = crate::persist::test_env("floating-focus-between-zoom");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let second = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        app.focus_pane_global(first);
+        app.zoomed = true;
+
+        app.focus_pane_global(second);
+
+        assert!(!app.zoomed, "a floating to floating focus change unzooms");
+        assert_eq!(app.layout().focus, second);
+        assert_eq!(app.layout().floating_rects()[0].0, second);
+
+        app.zoomed = true;
+        app.focus_history_back();
+
+        assert!(!app.zoomed, "history back to a floating pane unzooms");
+        assert_eq!(app.layout().focus, first);
+    }
+
+    #[test]
+    fn creating_a_floating_pane_keeps_the_tiled_layout_and_takes_focus() {
         let _env = crate::persist::test_env("floating-create-command");
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -21957,6 +21985,7 @@ fi
             .into_iter()
             .map(|pane| (pane.id, pane.rect))
             .collect();
+        let before = app.panes.len();
 
         let result = app
             .float_pane(floating_request(None, Some(shell_command(&app)), true))
@@ -21968,27 +21997,22 @@ fi
             .into_iter()
             .map(|pane| (pane.id, pane.rect))
             .collect();
+        assert_eq!(app.panes.len(), before + 1);
         assert_eq!(app.layout().leaves(), leaves);
         assert_eq!(tiled_after, tiled_before, "tiled geometry is unchanged");
         assert!(app.layout().is_floating(result.pane));
         assert_eq!(app.layout().floating_rects()[0].0, result.pane);
         assert!(app.panes.contains_key(&result.pane));
         assert_eq!((result.workspace, result.tab), (0, 0));
-    }
-
-    #[test]
-    fn creating_a_floating_pane_without_a_command_spawns_a_shell() {
-        let _env = crate::persist::test_env("floating-create-shell");
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(80, 24, tx).unwrap();
-        let before = app.panes.len();
-
-        let result = app.float_pane(floating_request(None, None, true)).unwrap();
-
-        assert_eq!(app.panes.len(), before + 1);
-        assert!(app.panes.contains_key(&result.pane));
-        assert!(app.layout().is_floating(result.pane));
         assert_eq!(app.layout().focus, result.pane);
+
+        // With no command the pane runs the default shell.
+        let before = app.panes.len();
+        let shell = app.float_pane(floating_request(None, None, true)).unwrap();
+        assert_eq!(app.panes.len(), before + 1);
+        assert!(app.panes.contains_key(&shell.pane));
+        assert!(app.layout().is_floating(shell.pane));
+        assert_eq!(app.layout().focus, shell.pane);
     }
 
     #[test]

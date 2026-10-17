@@ -45,14 +45,14 @@
 
 ## 7. Integration checks
 
-- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked`, and verify that all pass.
-- [ ] 7.2 In an isolated dev home (`env -u LUVUS_SOCKET_PATH -u LUVUS_SESSION LUVUS_HOME="$HOME/.luvus-dev" ./target/debug/luvus --session agent-test ...`), check the behavior that only a live run shows:
+- [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked`, and verify that all pass.
+- [x] 7.2 In an isolated dev home (`env -u LUVUS_SOCKET_PATH -u LUVUS_SESSION LUVUS_HOME="$HOME/.luvus-dev" ./target/debug/luvus --session agent-test ...`), check the behavior that only a live run shows:
   - a real floating module pane whose command exits and returns focus;
   - a server restart with a floating pane open;
   - a real second, smaller client attached.
 
   Record the results in the PR.
-- [ ] 7.3 Run `cargo build --release --locked` and verify that it succeeds.
+- [x] 7.3 Run `cargo build --release --locked` and verify that it succeeds.
 
 ## Workflow follow-up
 

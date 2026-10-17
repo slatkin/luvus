@@ -37,7 +37,7 @@
 ## 5. Modules
 
 - [x] 5.1 Add optional `width`, `height`, `x` and `y` to `PaneEntry` with serde defaults. In `module_open_pane`, validate floating geometry before the existing spawn, and add a `"floating"` arm after the spawn that calls `attach_floating` with the entry title. Verify with module tests for "Open a floating module pane", "Module prompt closes on exit", "Invalid manifest size" (no PTY spawned), and an old manifest without the fields that still loads. Check that the existing `split`, `overlay` and `tab` module tests still pass.
-- [ ] 5.2 Document `placement = "floating"` and its fields in `website/src/content/docs/docs/extend/writing-modules.mdx` and `skills/luvus-module/SKILL.md`, including the "modal" prompt pattern. Verify that the documented manifest example loads in a module test.
+- [x] 5.2 Document `placement = "floating"` and its fields in `website/src/content/docs/docs/extend/writing-modules.mdx` and `skills/luvus-module/SKILL.md`, including the "modal" prompt pattern. Verify that the documented manifest example loads in a module test.
 
 ## 6. Persistence
 

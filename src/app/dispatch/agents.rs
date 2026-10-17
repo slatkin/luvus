@@ -25,7 +25,7 @@ impl App {
                 // runs on the app loop, so it must stay a field read.
                 let is_worktree = ws.worktree.as_ref().is_some_and(|m| m.linked);
                 for (ti, tab) in ws.tabs.iter().enumerate() {
-                    for id in tab.layout.leaves() {
+                    for id in tab.layout.all_panes() {
                         let Some(s) = self.status.get(&id) else {
                             continue;
                         };
@@ -793,7 +793,7 @@ impl App {
         let mut hits: Vec<PaneId> = Vec::new();
         for ws in self.workspaces.iter() {
             for tab in ws.tabs.iter() {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     if self.status.get(&id).is_some_and(|s| s.agent == t) && self.is_agent_pane(id)
                     {
                         hits.push(id);

@@ -157,7 +157,7 @@ impl App {
                 if tab.is_git() || tab.is_orch() || tab.is_mission() {
                     continue;
                 }
-                for pane_id in tab.layout.leaves() {
+                for pane_id in tab.layout.all_panes() {
                     let Some(pane) = self.panes.get(&pane_id) else {
                         continue;
                     };
@@ -2167,6 +2167,47 @@ mod tests {
             app.backend_validate(&new_locator).unwrap()["state"],
             "alive"
         );
+    }
+
+    #[test]
+    fn floating_terminal_is_inventoried_and_can_be_observed_and_controlled() {
+        let _env = crate::persist::test_env("backend-floating-inventory");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let shell = crate::platform::resolve_shell(&app.config.shell);
+        let pane = app
+            .float_pane(FloatingPaneRequest {
+                target: None,
+                width: Some(20),
+                height: Some(6),
+                x: Some(4),
+                y: Some(2),
+                title: None,
+                focus: true,
+                command: Some(vec![shell]),
+            })
+            .expect("floating terminal spawns")
+            .pane;
+        let runtime = app.panes[&pane].terminal_runtime().unwrap();
+
+        let inventory = app.backend_inventory(&json!({})).unwrap();
+        let terminal = inventory["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|terminal| terminal["pane_id"].as_str() == Some(pane.0.to_string().as_str()))
+            .expect("the floating terminal is inventoried");
+        assert_eq!(terminal["terminal_id"], runtime.terminal_id);
+        assert_eq!(terminal["workspace"]["index"], 1);
+        assert_eq!(terminal["tab"]["index"], 1);
+
+        let target = locator(&app, pane);
+        assert_eq!(app.backend_validate(&target).unwrap()["state"], "alive");
+        assert_eq!(
+            app.prepare_backend_observe(&target).unwrap().pane_id,
+            pane.0.to_string()
+        );
+        assert_capture_succeeds(&mut app, target);
     }
 
     #[test]

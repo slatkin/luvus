@@ -1689,6 +1689,136 @@ fn a_target_resolves_by_kind_when_unique_and_is_ambiguous_when_not() {
     );
 }
 
+fn add_floating_agent(app: &mut App, agent: &str, focus: bool) -> PaneId {
+    let shell = crate::platform::resolve_shell(&app.config.shell);
+    let pane = app
+        .float_pane(crate::app::FloatingPaneRequest {
+            target: None,
+            width: Some(20),
+            height: Some(6),
+            x: Some(4),
+            y: Some(2),
+            title: None,
+            focus,
+            // A command spawns synchronously, so the pane has a terminal
+            // runtime for the snapshot and agent projections.
+            command: Some(vec![shell]),
+        })
+        .expect("floating pane spawns")
+        .pane;
+    let status = app.status.get_mut(&pane).expect("floating pane has status");
+    status.agent = agent.into();
+    status.state = State::Working;
+    pane
+}
+
+#[test]
+fn snapshot_lists_a_floating_agent_with_placement_and_focus() {
+    let _env = crate::persist::test_env("snapshot-floating-agent");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let tiled = app.layout().focus;
+    let floating = add_floating_agent(&mut app, "claude", true);
+    app.status.get_mut(&floating).unwrap().agent_session = Some(crate::app::AgentSession {
+        agent: "claude".into(),
+        session_id: "sess-float".into(),
+    });
+
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    let panes = snapshot["workspaces"][0]["tabs"][0]["panes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(panes.len(), 2, "the floating pane is a snapshot row");
+    let row = |pane: PaneId| {
+        let pane_id = pane.0.to_string();
+        panes
+            .iter()
+            .find(|row| row["pane_id"].as_str() == Some(pane_id.as_str()))
+            .expect("pane is in the snapshot")
+            .clone()
+    };
+    let tiled_row = row(tiled);
+    assert_eq!(tiled_row["kind"], "terminal");
+    assert_eq!(tiled_row["floating"], false);
+    assert_eq!(tiled_row["focused"], false);
+    assert!(tiled_row.get("rect").is_none());
+    assert!(tiled_row.get("z").is_none());
+
+    let floating_row = row(floating);
+    assert_eq!(floating_row["kind"], "terminal");
+    assert_eq!(floating_row["floating"], true);
+    assert_eq!(
+        floating_row["rect"],
+        json!({"x":4,"y":2,"width":20,"height":6})
+    );
+    assert_eq!(floating_row["z"], 0);
+    assert_eq!(floating_row["focused"], true);
+    assert_eq!(floating_row["agent"], "claude");
+    assert_eq!(floating_row["is_agent"], true);
+    assert_eq!(floating_row["agent_status"], "working");
+    assert_eq!(floating_row["agent_session"], "sess-float");
+    assert!(floating_row["cwd"].is_string());
+    assert!(floating_row["terminal_id"].is_string());
+}
+
+#[test]
+fn agent_list_includes_a_floating_agent() {
+    let _env = crate::persist::test_env("agent-list-floating");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let floating = add_floating_agent(&mut app, "claude", true);
+
+    let out = app.dispatch("agent.list", &json!({})).unwrap();
+    let rows = out["agents"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "only the floating pane runs an agent");
+    assert_eq!(rows[0]["pane"], floating.0.to_string());
+    assert_eq!(rows[0]["agent"], "claude");
+    assert_eq!(rows[0]["workspace"], "0");
+    assert_eq!(rows[0]["tab"], "1");
+    assert_eq!(rows[0]["focused"], true);
+}
+
+#[test]
+fn agent_kind_lookup_finds_a_floating_agent_and_counts_tiled_ones() {
+    let _env = crate::persist::test_env("agent-kind-floating");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let tiled = app.layout().focus;
+    let floating = add_floating_agent(&mut app, "claude", true);
+
+    assert_eq!(
+        app.resolve_agent_target(&json!({"target": "claude"})),
+        Ok(floating),
+        "a kind with one floating match resolves it"
+    );
+
+    app.status.get_mut(&tiled).unwrap().agent = "claude".into();
+    let error = app
+        .resolve_agent_target(&json!({"target": "claude"}))
+        .expect_err("one tiled and one floating match are ambiguous");
+    assert_eq!(error.0, "ambiguous_target");
+    let message = error.1;
+    assert!(message.contains(&format!("p{}", tiled.0)), "{message}");
+    assert!(message.contains(&format!("p{}", floating.0)), "{message}");
+}
+
+#[test]
+fn forking_a_floating_agent_is_still_rejected() {
+    let _env = crate::persist::test_env("agent-fork-floating");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let floating = add_floating_agent(&mut app, "claude", true);
+
+    for target in [floating.0.to_string(), "claude".to_string()] {
+        let error = app
+            .dispatch("agent.fork", &json!({"target": target}))
+            .expect_err("floating panes cannot be forked");
+        assert_eq!(error.0, "invalid_request");
+        assert_eq!(error.1, "pane is floating");
+    }
+    assert_eq!(app.layout().leaves(), vec![app.layout().tiled_focus]);
+}
+
 #[test]
 fn agent_keys_requires_a_recognized_agent_before_sending() {
     let (tx, _rx) = std::sync::mpsc::channel();

@@ -1455,6 +1455,25 @@ fn resize_panes_to_content(
     }
 }
 
+/// One Commander preview label: the pane id, its agent and state, plus a
+/// floating marker because a mention alone looks the same for both kinds.
+fn commander_target_label(app: &App, cat: &crate::i18n::Catalog, id: PaneId) -> Option<String> {
+    let status = app.status.get(&id)?;
+    if !app.panes.contains_key(&id) {
+        return None;
+    }
+    let label = if app.is_agent_pane(id) {
+        format!("p{} {} {}", id.0, status.agent, status.state.label())
+    } else {
+        format!("p{} {}", id.0, status.agent)
+    };
+    Some(if app.is_floating_pane(id) {
+        format!("{label} ({})", cat.floating_marker)
+    } else {
+        label
+    })
+}
+
 fn draw_commander(
     f: &mut RenderTarget,
     rect: Rect,
@@ -1469,16 +1488,7 @@ fn draw_commander(
     let preview = commander
         .preview
         .iter()
-        .filter_map(|id| {
-            let status = app.status.get(id)?;
-            app.panes.contains_key(id).then(|| {
-                if app.is_agent_pane(*id) {
-                    format!("p{} {} {}", id.0, status.agent, status.state.label())
-                } else {
-                    format!("p{} {}", id.0, status.agent)
-                }
-            })
-        })
+        .filter_map(|id| commander_target_label(app, cat, *id))
         .collect::<Vec<_>>()
         .join(" · ");
     let title = if preview.is_empty() {

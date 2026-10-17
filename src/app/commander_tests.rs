@@ -2103,6 +2103,60 @@ fn tab_completes_the_typed_at_in_place_with_a_pane_name() {
     assert_eq!(app.commander.as_ref().unwrap().draft, "@build");
 }
 
+fn add_floating_shell(app: &mut App) -> PaneId {
+    app.float_pane(crate::app::FloatingPaneRequest {
+        target: None,
+        width: Some(20),
+        height: Some(6),
+        x: Some(2),
+        y: Some(2),
+        title: None,
+        focus: false,
+        command: Some(vec![crate::platform::resolve_shell(&app.config.shell)]),
+    })
+    .expect("the floating shell spawns")
+    .pane
+}
+
+#[test]
+fn picker_candidates_include_floating_panes_scoped_and_unscoped() {
+    let _env = crate::persist::test_env("commander-floating-candidates");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let tiled = app.layout().focus;
+    let floating = add_floating_shell(&mut app);
+    app.set_agent_name(tiled, Some("build"));
+    app.set_agent_name(floating, Some("floaty"));
+    app.open_commander();
+
+    // Unscoped: Tab walks the renderer's pane order, which lists the floating
+    // pane after the tab's tiled leaves.
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@".into();
+    commander.cursor = 1;
+    app.refresh_commander_preview();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "@build");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        "@floaty",
+        "the floating pane is a selectable candidate"
+    );
+
+    // Scoped: the tab's last candidate is its floating pane.
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@tab:1/pane:".into();
+    commander.cursor = commander.draft.len();
+    app.refresh_commander_preview();
+    app.commander_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        "@tab:1/pane:floaty",
+        "a scoped picker reaches the floating pane too"
+    );
+}
+
 #[test]
 fn split_actions_target_exact_panes_and_cannot_repeat_on_enter() {
     let _env = crate::persist::test_env("commander-split-actions");

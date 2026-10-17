@@ -130,9 +130,14 @@ pub(in crate::app::dispatch) fn pane_placement(
     let rect = rects[z].1;
     json!({
         "floating": true,
-        "rect": {"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height},
+        "rect": rect_json(rect),
         "z": z,
     })
+}
+
+/// Public JSON shape of a pane rectangle.
+pub(in crate::app::dispatch) fn rect_json(rect: Rect) -> Value {
+    json!({"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height})
 }
 
 /// Merge placement fields into an existing pane projection object.

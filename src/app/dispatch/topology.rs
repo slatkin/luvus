@@ -1839,7 +1839,7 @@ impl App {
         let mut value = json!({
             "type":"pane_layout", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
             "tab":(tab+1).to_string(), "logical_size":{"width":area.width,"height":area.height},
-            "rect":{"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height},
+            "rect":rect_json(rect),
             "tree":layout.to_tree(),
         });
         if floating {

@@ -415,9 +415,11 @@ pub(super) fn draw_floating_panes(
     app.diff_source_rects.extend(diff_source_rects);
     app.diff_note_rects.extend(diff_note_rects);
     app.preview_link_rects.extend(preview_link_rects);
-    app.rendered_hyperlinks.append(&mut rendered_hyperlinks);
-    app.rendered_hyperlinks
-        .sort_by_key(|link| (link.y, link.start, link.pane.0));
+    if !rendered_hyperlinks.is_empty() {
+        app.rendered_hyperlinks.append(&mut rendered_hyperlinks);
+        app.rendered_hyperlinks
+            .sort_by_key(|link| (link.y, link.start, link.pane.0));
+    }
     title_rects.reverse();
     (cursor, title_rects)
 }

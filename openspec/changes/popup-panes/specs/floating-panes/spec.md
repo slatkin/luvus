@@ -236,8 +236,39 @@ Floating panes SHALL be server state. Every attached client SHALL see the same f
 - **WHEN** a passive client with a smaller terminal views a tab with a floating pane
 - **THEN** that client draws the pane clamped to its area, and the stored geometry and PTY size do not change
 
+### Requirement: Floating panes are visible to agents
+Every agent-facing surface SHALL treat a floating pane as a full pane. The live runtime snapshot (`session.snapshot`), the agent list, agent kind and name lookup, the terminal backend inventory, Mission Control usage and rows, orchestration agent choices and pane reuse, the agents dock, and pane events SHALL include a floating pane in the same way as a tiled pane, and SHALL mark it as floating with its rectangle and stacking position where the surface reports panes. A surface that picks a pane to split or to place a new pane next to SHALL use a tiled pane. Luvus Web MAY omit floating panes from its views.
+
+#### Scenario: Snapshot with a floating agent
+- **WHEN** a tab has one tiled pane and one floating pane that runs an agent, and a client requests `session.snapshot`
+- **THEN** the snapshot lists both panes, the floating one with `floating: true`, its agent kind and status, and `focused: true` when it holds focus
+
+#### Scenario: Agent list with a floating agent
+- **WHEN** a client lists agents and one agent runs in a floating pane
+- **THEN** the list includes that agent with its workspace, tab and pane
+
+#### Scenario: Agent kind lookup
+- **WHEN** a client addresses an agent by kind and the only matching agent runs in a floating pane
+- **THEN** the request reaches that agent, and two matches (one tiled, one floating) are reported as ambiguous
+
+#### Scenario: Terminal backend inventory
+- **WHEN** a tab has a floating pane
+- **THEN** the terminal backend inventory lists its terminal, and a client can observe and control it
+
+#### Scenario: Mission Control
+- **WHEN** a floating pane runs an agent session with usage data
+- **THEN** Mission Control shows a row for it and reads its usage
+
+#### Scenario: Orchestration choices
+- **WHEN** an active agent runs in a floating pane
+- **THEN** it appears among the orchestration automation choices and can be reused for a task, and a new pane that orchestration places next to a tab's pane is never split from the floating pane
+
+#### Scenario: Events for a floating pane
+- **WHEN** a floating pane is created, focused or closed
+- **THEN** the matching pane events fire with the same payload shape as for a tiled pane
+
 ### Requirement: Floating panes are not persisted
-The session snapshot SHALL NOT contain floating panes. After a server restart, no floating pane SHALL return, and each tab SHALL restore its tiled layout and tiled focus.
+The persisted session snapshot (the saved file) SHALL NOT contain floating panes; the live runtime snapshot is separate and does. After a server restart, no floating pane SHALL return, and each tab SHALL restore its tiled layout and tiled focus.
 
 #### Scenario: Restart with a floating pane open
 - **WHEN** a tab has a focused floating pane and the server restarts

@@ -526,8 +526,8 @@ impl App {
     }
 
     /// Open a module's `[[panes]]` entrypoint as a real luvus pane (MOD-2),
-    /// placed per `placement` (split | overlay | tab; default split). Returns the
-    /// new pane id.
+    /// placed per `placement` (split | overlay | tab | floating; default from
+    /// the entry, else split). Returns the new pane id.
     pub fn module_open_pane(
         &mut self,
         module_id: &str,
@@ -536,7 +536,7 @@ impl App {
         source: &str,
     ) -> Result<PaneId, String> {
         let module_id = self.module_id_for(module_id)?;
-        let argv = {
+        let entry = {
             let m = self
                 .modules
                 .find(&module_id)
@@ -553,10 +553,48 @@ impl App {
                 .find(|p| {
                     p.id == entrypoint && crate::module::manifest::allowed_on(p.platforms.as_ref())
                 })
-                .map(|p| p.command.clone())
+                .cloned()
                 .ok_or_else(|| format!("module {module_id} has no pane {entrypoint}"))?
         };
-        let placement = placement.unwrap_or("split");
+        let argv = entry.command.clone();
+        let placement = placement.unwrap_or(entry.placement.as_str());
+
+        // A floating entry validates its tab and geometry before the spawn, like
+        // `pane.float`, so an invalid manifest never leaves a PTY behind.
+        let floating = if placement == "floating" {
+            let workspace = self.active_ws;
+            let tab = self
+                .workspaces
+                .get(workspace)
+                .map(|workspace| workspace.active_tab)
+                .ok_or_else(|| {
+                    format!("module {module_id} has no workspace for a floating pane")
+                })?;
+            self.validate_floating_target(workspace, tab).map_err(|_| {
+                format!("module {module_id} cannot open a floating pane in this tab")
+            })?;
+            let area = self.split_area();
+            let (default_width, default_height) = crate::layout::default_floating_size(area);
+            let width = entry.width.unwrap_or(default_width);
+            let height = entry.height.unwrap_or(default_height);
+            if width < crate::layout::MIN_FLOATING || height < crate::layout::MIN_FLOATING {
+                return Err(format!(
+                    "pane {}: width and height must be at least {}",
+                    entry.id,
+                    crate::layout::MIN_FLOATING
+                ));
+            }
+            let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
+            let cascade = (entry.x.is_none() || entry.y.is_none()).then(|| {
+                crate::layout::cascade_floating_position(area, width, height, last_cascade)
+            });
+            let x = entry.x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
+            let y = entry.y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
+            let geometry = crate::layout::clamp_floating_rect(Rect::new(x, y, width, height), area);
+            Some((workspace, tab, geometry, x, y))
+        } else {
+            None
+        };
 
         let ctx = context::build(self, source);
         let (root, env) = {
@@ -608,6 +646,33 @@ impl App {
             "overlay" => {
                 self.split_focused_auto(id);
                 self.zoomed = true; // fill the screen, overlay-style
+            }
+            "floating" => {
+                let Some((workspace, tab, geometry, x, y)) = floating else {
+                    return Err(format!("module {module_id} has no floating geometry"));
+                };
+                // The spec makes a floating module pane take focus and show the
+                // entry title. A failed attach must not leak the spawned PTY.
+                if let Err(error) = self.attach_floating(
+                    id,
+                    workspace,
+                    tab,
+                    geometry,
+                    Some(entry.title.clone()),
+                    true,
+                ) {
+                    self.close_pane(id);
+                    let reason = match error {
+                        FloatingPaneError::PaneNotFound => "the target tab is gone",
+                        FloatingPaneError::TargetNotPaneTab => {
+                            "the target tab cannot hold a floating pane"
+                        }
+                        FloatingPaneError::InvalidGeometry => "invalid floating pane geometry",
+                        FloatingPaneError::SpawnFailed => "the pane could not be attached",
+                    };
+                    return Err(format!("cannot open floating module pane: {reason}"));
+                }
+                self.workspaces[workspace].tabs[tab].last_cascade = Some((x, y));
             }
             _ => {
                 self.split_focused_auto(id);
@@ -1148,6 +1213,128 @@ command = ["sh", "-c", "echo hello-from-module; echo oops 1>&2"]
         assert!(app.modules.find(&id).is_none());
 
         std::env::remove_var("LUVUS_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The `[[panes]]` example documented for `placement = "floating"`.
+    const FLOATING_PANE_MANIFEST: &str = r#"
+id = "you.prompt"
+name = "Prompt"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[panes]]
+id = "prompt"
+title = "Pick a branch"
+placement = "floating"
+width = 60
+height = 8
+x = 10
+y = 3
+command = ["sh", "prompt.sh"]
+"#;
+
+    fn link_prompt_module(app: &mut App, home: &Path, manifest: &str) {
+        let dir = home.join("prompt-mod");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("luvus-module.toml"), manifest).unwrap();
+        app.module_link_with(&dir, true, None).unwrap();
+    }
+
+    #[test]
+    fn open_module_pane_floating_uses_entry_geometry_and_title() {
+        use ratatui::layout::Rect;
+
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("luvus-floatpane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link_prompt_module(&mut app, &home, FLOATING_PANE_MANIFEST);
+        let tiled = app.layout().focus;
+        let before = app.panes.len();
+
+        // No explicit placement: the manifest entry declares floating.
+        let pid = app
+            .module_open_pane("you.prompt", "prompt", None, "test")
+            .expect("the floating module pane opens");
+
+        assert_eq!(app.panes.len(), before + 1, "a real pane was spawned");
+        assert!(app.layout().is_floating(pid));
+        assert_eq!(
+            app.layout().floating_rects(),
+            vec![(pid, Rect::new(10, 3, 60, 8))],
+            "the entry geometry places the floating pane"
+        );
+        assert_eq!(app.layout().focus, pid, "the new floating pane takes focus");
+        assert_eq!(app.layout().tiled_focus, tiled);
+        assert!(!app.layout().leaves().contains(&pid));
+        assert_eq!(
+            app.workspaces[0].tabs[0]
+                .floating_titles
+                .get(&pid)
+                .map(String::as_str),
+            Some("Pick a branch")
+        );
+        assert!(app.module_panes.contains_key(&pid));
+
+        app.close_pane(pid);
+        assert!(!app.panes.contains_key(&pid));
+        assert!(!app.module_panes.contains_key(&pid));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn floating_module_pane_closes_on_exit_and_returns_focus() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("luvus-floatpane-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link_prompt_module(&mut app, &home, FLOATING_PANE_MANIFEST);
+        let tiled = app.layout().focus;
+        let pid = app
+            .module_open_pane("you.prompt", "prompt", None, "test")
+            .expect("the floating module pane opens");
+        assert_eq!(app.layout().focus, pid);
+
+        // The ordinary pane-exit path closes it and restores the prior focus.
+        app.handle_event(AppEvent::PtyExit(pid));
+
+        assert!(!app.panes.contains_key(&pid));
+        assert!(!app.layout().is_floating(pid));
+        assert!(!app.module_panes.contains_key(&pid));
+        assert_eq!(app.layout().focus, tiled);
+        assert_eq!(app.layout().tiled_focus, tiled);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_invalid_floating_module_size_spawns_nothing() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("luvus-floatpane-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let manifest = FLOATING_PANE_MANIFEST.replace("width = 60", "width = 0");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link_prompt_module(&mut app, &home, &manifest);
+        let before = app.panes.len();
+
+        let error = app
+            .module_open_pane("you.prompt", "prompt", None, "test")
+            .unwrap_err();
+
+        assert!(error.contains("at least 3"), "got: {error}");
+        assert_eq!(app.panes.len(), before, "no PTY is spawned");
+        assert!(app.layout().floating_rects().is_empty());
+        assert!(app.module_panes.is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 

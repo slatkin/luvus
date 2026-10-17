@@ -93,14 +93,9 @@ const FLOATING_CASCADE_START: (u16, u16) = (4, 2);
 /// Cascade step between floating panes (tmux 3.8).
 const FLOATING_CASCADE_STEP: (u16, u16) = (4, 2);
 
-// The floating-pane helpers and accessors below are consumed by the app,
-// render and dispatch tasks of the popup-panes change. They stay dead code
-// until that wiring lands.
-
 /// Default outer size for a floating pane created without a size: half the
 /// pane area's width and a quarter of its height. Never smaller than
 /// [`MIN_FLOATING`], never larger than the area.
-#[allow(dead_code)]
 pub fn default_floating_size(area: Rect) -> (u16, u16) {
     let width = (area.width / 2).clamp(MIN_FLOATING.min(area.width), area.width);
     let height = (area.height / 4).clamp(MIN_FLOATING.min(area.height), area.height);
@@ -114,7 +109,6 @@ pub fn default_floating_size(area: Rect) -> (u16, u16) {
 /// one moves 4 right and 2 down. An axis whose next value would put the pane
 /// past the pane area restarts at 4 or 2. Positions are relative to the pane
 /// area. The returned position is also the cursor to pass as `last` next time.
-#[allow(dead_code)]
 pub fn cascade_floating_position(
     area: Rect,
     width: u16,
@@ -141,7 +135,6 @@ pub fn cascade_floating_position(
 /// The minimum outer size is [`MIN_FLOATING`] by [`MIN_FLOATING`], unless the
 /// area itself is smaller. Rects use pane-area coordinates, so only the area's
 /// extent matters here.
-#[allow(dead_code)]
 pub fn clamp_floating_rect(rect: Rect, area: Rect) -> Rect {
     let width = rect.width.clamp(MIN_FLOATING.min(area.width), area.width);
     let height = rect
@@ -242,7 +235,6 @@ impl TileLayout {
 
     /// Stored floating pane rects, top first. Rects are relative to the tab's
     /// pane area.
-    #[allow(dead_code)]
     pub fn floating_rects(&self) -> Vec<(PaneId, Rect)> {
         self.floating.iter().rev().copied().collect()
     }
@@ -253,14 +245,12 @@ impl TileLayout {
     }
 
     /// Add a floating pane above the current top one.
-    #[allow(dead_code)]
     pub fn add_floating(&mut self, id: PaneId, rect: Rect) {
         self.floating.push((id, rect));
     }
 
     /// Move a floating pane to the top of the stack. Returns `false` when the
     /// pane is not floating.
-    #[allow(dead_code)]
     pub fn raise(&mut self, id: PaneId) -> bool {
         let Some(index) = self.floating.iter().position(|(pane, _)| *pane == id) else {
             return false;
@@ -284,7 +274,8 @@ impl TileLayout {
         }
     }
 
-    /// Geometry for every pane within `area`.
+    /// Tiled pane geometry within `area`. Floating panes have stored rects
+    /// instead, so they are excluded here.
     pub fn panes(&self, area: Rect) -> Vec<PaneInfo> {
         let mut v = Vec::new();
         collect(&self.root, area, &mut v);

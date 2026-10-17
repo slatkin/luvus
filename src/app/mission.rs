@@ -243,6 +243,8 @@ impl App {
             orch: false,
             mission: true,
             name: None,
+            floating_titles: HashMap::new(),
+            last_cascade: None,
         });
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;
@@ -265,6 +267,10 @@ impl App {
     pub fn close_mission_tab(&mut self) {
         let at = self.ws().active_tab;
         if self.ws().tabs.get(at).is_some_and(Tab::is_mission) {
+            debug_assert!(
+                self.ws().tabs[at].layout.floating_rects().is_empty(),
+                "Mission Control tabs cannot own floating panes"
+            );
             let ws = &mut self.workspaces[self.active_ws];
             ws.tabs.remove(at);
             if ws.tabs.is_empty() {

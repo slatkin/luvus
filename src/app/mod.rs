@@ -580,6 +580,12 @@ pub struct Tab {
     /// User-chosen tab name (docs/28). `None` → the tab bar shows its number.
     /// Git/orch/mission tabs keep their fixed label and are never named.
     pub name: Option<String>,
+    /// Title overrides for this tab's floating panes, keyed by pane id. A
+    /// floating pane without an entry uses the normal pane title.
+    pub floating_titles: HashMap<PaneId, String>,
+    /// Cascade cursor for the next floating pane without an explicit position.
+    /// `None` means the next pane starts at the first cascade position.
+    pub last_cascade: Option<(u16, u16)>,
 }
 
 impl Tab {
@@ -592,6 +598,8 @@ impl Tab {
             orch: false,
             mission: false,
             name: None,
+            floating_titles: HashMap::new(),
+            last_cascade: None,
         }
     }
 
@@ -1059,6 +1067,41 @@ pub enum PaneMoveError {
 pub struct PaneMoveResult {
     pub workspace: usize,
     pub tab: usize,
+}
+
+/// A validated request to create a floating pane. Dispatch validates raw
+/// request types before building this; the app validates the tab kind, the
+/// geometry and the spawn before any mutation.
+pub struct FloatingPaneRequest {
+    /// The pane whose tab receives the new floating pane. `None` uses the
+    /// active tab.
+    pub target: Option<PaneId>,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+    pub x: Option<u16>,
+    pub y: Option<u16>,
+    pub title: Option<String>,
+    /// Whether the new pane takes focus. Defaults to `true` at the API boundary.
+    pub focus: bool,
+    /// Explicit argv, or `None` for the default shell.
+    pub command: Option<Vec<String>>,
+}
+
+/// Where a new floating pane landed (internal zero-based indices).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FloatingPaneResult {
+    pub pane: PaneId,
+    pub workspace: usize,
+    pub tab: usize,
+}
+
+/// Why a floating pane could not be created.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FloatingPaneError {
+    PaneNotFound,
+    TargetNotPaneTab,
+    InvalidGeometry,
+    SpawnFailed,
 }
 
 /// Why a tab could not be moved to a new position.
@@ -3875,6 +3918,8 @@ impl App {
                             orch: false,
                             mission: false,
                             name: None,
+                            floating_titles: HashMap::new(),
+                            last_cascade: None,
                         });
                     }
                     continue;
@@ -3890,6 +3935,8 @@ impl App {
                         orch: true,
                         mission: false,
                         name: None,
+                        floating_titles: HashMap::new(),
+                        last_cascade: None,
                     });
                     continue;
                 }
@@ -3904,6 +3951,8 @@ impl App {
                         orch: false,
                         mission: true,
                         name: None,
+                        floating_titles: HashMap::new(),
+                        last_cascade: None,
                     });
                     continue;
                 }
@@ -5683,6 +5732,170 @@ impl App {
         let (cwd, fallback_cwds) = cwds.split_first()?;
         self.spawn_and_attach_new_pane(wsi, ti, pane, axis, focus, |app| {
             app.spawn_into_deferred(cwd.clone(), fallback_cwds)
+        })
+    }
+
+    /// Validate that a tab may hold a floating pane. Dashboard tabs (Git, ORCH
+    /// and Mission Control) use a placeholder leaf and reject pane commands, so
+    /// they must reject floating panes before anything is spawned.
+    fn validate_floating_target(
+        &self,
+        workspace: usize,
+        tab: usize,
+    ) -> Result<(), FloatingPaneError> {
+        let workspace = self
+            .workspaces
+            .get(workspace)
+            .ok_or(FloatingPaneError::PaneNotFound)?;
+        let tab = workspace
+            .tabs
+            .get(tab)
+            .ok_or(FloatingPaneError::PaneNotFound)?;
+        if !tab.is_renameable() {
+            return Err(FloatingPaneError::TargetNotPaneTab);
+        }
+        Ok(())
+    }
+
+    /// Attach an already spawned pane as a floating pane of `workspace`/`tab`.
+    ///
+    /// The geometry is the stored outer rect in pane-area cells. A create path
+    /// validates the tab kind and geometry before it spawns, so this cannot
+    /// leave an orphan PTY. Attaching always leaves the new pane on top and
+    /// clears zoom; `focus` additionally moves focus to it and records the
+    /// previous focus in history.
+    pub(crate) fn attach_floating(
+        &mut self,
+        pane_id: PaneId,
+        workspace: usize,
+        tab: usize,
+        geometry: Rect,
+        title: Option<String>,
+        focus: bool,
+    ) -> Result<(), FloatingPaneError> {
+        self.validate_floating_target(workspace, tab)?;
+        if geometry.width < crate::layout::MIN_FLOATING
+            || geometry.height < crate::layout::MIN_FLOATING
+        {
+            return Err(FloatingPaneError::InvalidGeometry);
+        }
+        let layout = &mut self.workspaces[workspace].tabs[tab].layout;
+        if layout.contains(pane_id) {
+            return Err(FloatingPaneError::InvalidGeometry);
+        }
+        layout.add_floating(pane_id, geometry);
+        if let Some(title) = title {
+            self.workspaces[workspace].tabs[tab]
+                .floating_titles
+                .insert(pane_id, title);
+        }
+        // Creating a floating pane in a zoomed tab unzooms it, even when the
+        // request keeps focus where it was.
+        self.zoomed = false;
+        if focus {
+            self.focus_location(workspace, tab, pane_id);
+        }
+        Ok(())
+    }
+
+    /// Create a floating pane in the tab that owns the target pane, or in the
+    /// active tab when no target is given.
+    ///
+    /// Every fallible check (workspace, target tab kind, size) runs before the
+    /// spawn. The stored rect defaults to half the pane area by a quarter and
+    /// cascades like tmux when a position is missing. A shell uses the same cwd
+    /// candidates as a tiled split; an explicit command is an argv.
+    // Consumed by the `pane.float` dispatch task and the module floating
+    // placement task of the popup-panes change.
+    #[allow(dead_code)]
+    pub(crate) fn float_pane(
+        &mut self,
+        request: FloatingPaneRequest,
+    ) -> Result<FloatingPaneResult, FloatingPaneError> {
+        if self.workspaces.is_empty() && !self.ensure_workspace_for_terminal() {
+            return Err(FloatingPaneError::SpawnFailed);
+        }
+        let (workspace, tab, target) = match request.target {
+            Some(pane) => {
+                let (workspace, tab) = self
+                    .pane_location(pane)
+                    .ok_or(FloatingPaneError::PaneNotFound)?;
+                (workspace, tab, pane)
+            }
+            None => {
+                let workspace = self.active_ws;
+                let tab = self
+                    .workspaces
+                    .get(workspace)
+                    .map(|workspace| workspace.active_tab)
+                    .ok_or(FloatingPaneError::PaneNotFound)?;
+                (workspace, tab, self.layout().focus)
+            }
+        };
+        self.validate_floating_target(workspace, tab)?;
+
+        let area = self.split_area();
+        let (default_width, default_height) = crate::layout::default_floating_size(area);
+        let width = request.width.unwrap_or(default_width);
+        let height = request.height.unwrap_or(default_height);
+        if width < crate::layout::MIN_FLOATING || height < crate::layout::MIN_FLOATING {
+            return Err(FloatingPaneError::InvalidGeometry);
+        }
+        let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
+        let cascade = (request.x.is_none() || request.y.is_none())
+            .then(|| crate::layout::cascade_floating_position(area, width, height, last_cascade));
+        let x = request.x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
+        let y = request.y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
+        let geometry = crate::layout::clamp_floating_rect(Rect::new(x, y, width, height), area);
+
+        let cwds = self.spawn_cwds_for(workspace, target, None);
+        let (cwd, fallback_cwds) = cwds.split_first().ok_or(FloatingPaneError::SpawnFailed)?;
+        let pane_id = match request.command {
+            Some(argv) => {
+                let id = PaneId::alloc();
+                let pane = Pane::spawn_command(
+                    id,
+                    80,
+                    24,
+                    cwd.clone(),
+                    self.app_tx.clone(),
+                    &argv,
+                    &[],
+                    self.config.scrollback_bytes(),
+                    self.pane_appearance,
+                )
+                .map_err(|_| FloatingPaneError::SpawnFailed)?;
+                let cmd = pane.command.clone();
+                self.panes.insert(id, pane);
+                self.status.insert(id, PaneStatus::new(cmd));
+                self.session_dirty = true;
+                self.emit_event(
+                    "pane.created",
+                    serde_json::json!({"pane": id.0.to_string()}),
+                );
+                id
+            }
+            None => self
+                .spawn_into_deferred(cwd.clone(), fallback_cwds)
+                .ok_or(FloatingPaneError::SpawnFailed)?,
+        };
+
+        if let Err(error) = self.attach_floating(
+            pane_id,
+            workspace,
+            tab,
+            geometry,
+            request.title,
+            request.focus,
+        ) {
+            self.close_pane(pane_id);
+            return Err(error);
+        }
+        self.workspaces[workspace].tabs[tab].last_cascade = Some((x, y));
+        Ok(FloatingPaneResult {
+            pane: pane_id,
+            workspace,
+            tab,
         })
     }
 
@@ -9033,10 +9246,29 @@ impl App {
         history.push(id);
     }
 
+    /// Set a tab's pane focus and keep floating bookkeeping in step: a floating
+    /// pane rises to the top, a tiled pane becomes `tiled_focus`.
+    fn set_tab_focus(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        let layout = &mut self.workspaces[workspace].tabs[tab].layout;
+        if layout.is_floating(id) {
+            layout.raise(id);
+        } else {
+            layout.tiled_focus = id;
+        }
+        layout.focus = id;
+    }
+
     fn set_focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        // Zoom applies to the pane this client was looking at, so compare the
+        // departing pane (which may be in another tab) with the destination.
+        let was_floating = self.layout().is_floating(self.layout().focus);
+        self.set_tab_focus(workspace, tab, id);
+        let is_floating = self.workspaces[workspace].tabs[tab].layout.is_floating(id);
+        if was_floating != is_floating {
+            self.zoomed = false;
+        }
         self.active_ws = workspace;
         self.workspaces[workspace].active_tab = tab;
-        self.workspaces[workspace].tabs[tab].layout.focus = id;
         self.cancel_pane_search();
         self.scroll_pane = None;
         self.mode = Mode::Normal;
@@ -9052,6 +9284,9 @@ impl App {
             self.focus_history_forward.clear();
             self.set_focus_location(workspace, tab, id);
         } else {
+            // Re-focusing the floating pane that already has focus still raises
+            // it above a newer no-focus floating pane.
+            self.workspaces[workspace].tabs[tab].layout.raise(id);
             self.mode = Mode::Normal;
         }
     }
@@ -9060,7 +9295,7 @@ impl App {
         let mut found = None;
         for (wi, ws) in self.workspaces.iter().enumerate() {
             for (ti, tab) in ws.tabs.iter().enumerate() {
-                if tab.layout.leaves().contains(&id) {
+                if tab.layout.contains(id) {
                     found = Some((wi, ti));
                 }
             }
@@ -9635,10 +9870,27 @@ impl App {
     }
 
     fn close_pane(&mut self, id: PaneId) {
+        // A focused floating pane closes back to the pane that had focus before
+        // it, like tmux's per-window last-panes list. The walk happens before
+        // this pane is purged from history, and only considers the same tab.
+        let owner = self.pane_location(id);
+        let floating_focus_return = owner.and_then(|(workspace, tab)| {
+            let layout = &self.workspaces[workspace].tabs[tab].layout;
+            if !layout.is_floating(id) || layout.focus != id {
+                return None;
+            }
+            let target = self
+                .focus_history_back
+                .iter()
+                .rev()
+                .copied()
+                .find(|pane| *pane != id && self.pane_location(*pane) == Some((workspace, tab)))
+                .unwrap_or(layout.tiled_focus);
+            Some((workspace, tab, target))
+        });
         self.focus_history_back.retain(|pane| *pane != id);
         self.focus_history_forward.retain(|pane| *pane != id);
         crate::orch::worker::discard(id);
-        let owner = self.pane_location(id);
         let durable = self
             .automation
             .automations
@@ -9678,6 +9930,17 @@ impl App {
         self.session_dirty = true;
         if let Some((workspace, tab)) = owner {
             let tab_is_empty = self.workspaces[workspace].tabs[tab].layout.remove(id);
+            let tab_state = &mut self.workspaces[workspace].tabs[tab];
+            tab_state.floating_titles.remove(&id);
+            if tab_state.layout.floating_rects().is_empty() {
+                // A fresh cascade starts again after the last floating pane.
+                tab_state.last_cascade = None;
+            }
+            if let Some((_, _, target)) = floating_focus_return {
+                if self.workspaces[workspace].tabs[tab].layout.contains(target) {
+                    self.set_tab_focus(workspace, tab, target);
+                }
+            }
             if tab_is_empty {
                 self.close_empty_tab(workspace, tab);
             }
@@ -9708,8 +9971,24 @@ impl App {
 
     fn close_active_tab(&mut self) {
         let workspace_index = self.active_ws;
+        let tab_index = self.workspaces[self.active_ws].active_tab;
+        // A tab with floating panes still closes as soon as its tiled tree is
+        // empty, and its floating PTYs must end with it.
+        let floating = self.workspaces[workspace_index]
+            .tabs
+            .get(tab_index)
+            .map(|tab| {
+                tab.layout
+                    .floating_rects()
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for pane in floating {
+            self.close_pane(pane);
+        }
         let ws = &mut self.workspaces[self.active_ws];
-        let tab_index = ws.active_tab;
         let mut removed = false;
         if ws.active_tab < ws.tabs.len() {
             ws.tabs.remove(ws.active_tab);
@@ -10206,6 +10485,27 @@ mod tests {
             reply,
         }))
         .unwrap()
+    }
+
+    fn floating_request(
+        target: Option<PaneId>,
+        command: Option<Vec<String>>,
+        focus: bool,
+    ) -> FloatingPaneRequest {
+        FloatingPaneRequest {
+            target,
+            width: None,
+            height: None,
+            x: None,
+            y: None,
+            title: None,
+            focus,
+            command,
+        }
+    }
+
+    fn shell_command(app: &App) -> Vec<String> {
+        vec![crate::platform::resolve_shell(&app.config.shell)]
     }
 
     /// The new-pane cwd resolver hands back the chain of directories that still
@@ -21086,6 +21386,362 @@ fi
             "the default prefix then y starts copy mode over a Codex transcript"
         );
         assert!(app.copy_mode.is_some());
+    }
+
+    #[test]
+    fn focusing_a_floating_pane_raises_it() {
+        let _env = crate::persist::test_env("floating-focus-raises");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let a = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let b = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        assert_eq!(app.layout().floating_rects()[0].0, b, "new pane on top");
+
+        app.focus_pane_global(a);
+
+        assert_eq!(app.layout().focus, a);
+        assert_eq!(app.layout().floating_rects()[0].0, a, "focus raises");
+    }
+
+    #[test]
+    fn focusing_a_floating_pane_in_another_tab_switches_to_it() {
+        let _env = crate::persist::test_env("floating-focus-other-tab");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        assert_eq!(app.ws().active_tab, 1);
+
+        app.focus_pane_global(floating);
+
+        assert_eq!(app.ws().active_tab, 0);
+        assert_eq!(app.layout().focus, floating);
+        assert_eq!(app.layout().floating_rects()[0].0, floating);
+    }
+
+    #[test]
+    fn focusing_a_floating_pane_while_zoomed_unzooms() {
+        let _env = crate::persist::test_env("floating-focus-while-zoomed");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, None, false))
+            .unwrap()
+            .pane;
+        app.zoomed = true;
+
+        app.focus_pane_global(floating);
+
+        assert!(!app.zoomed);
+        assert_eq!(app.layout().focus, floating);
+        assert_eq!(app.layout().floating_rects()[0].0, floating);
+    }
+
+    #[test]
+    fn focus_leaves_a_zoomed_floating_pane() {
+        let _env = crate::persist::test_env("floating-focus-leaves-zoom");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        app.zoomed = true;
+
+        app.focus_pane_global(tiled);
+
+        assert!(!app.zoomed);
+        assert_eq!(app.layout().focus, tiled);
+        assert_eq!(app.layout().tiled_focus, tiled);
+        assert!(
+            app.focus_history_back.contains(&floating),
+            "history records the floating pane"
+        );
+    }
+
+    #[test]
+    fn creating_a_floating_pane_with_a_command_keeps_the_tiled_layout() {
+        let _env = crate::persist::test_env("floating-create-command");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let area = app.split_area();
+        let leaves = app.layout().leaves();
+        let tiled_before: Vec<(PaneId, Rect)> = app
+            .layout()
+            .panes(area)
+            .into_iter()
+            .map(|pane| (pane.id, pane.rect))
+            .collect();
+
+        let result = app
+            .float_pane(floating_request(None, Some(shell_command(&app)), true))
+            .unwrap();
+
+        let tiled_after: Vec<(PaneId, Rect)> = app
+            .layout()
+            .panes(area)
+            .into_iter()
+            .map(|pane| (pane.id, pane.rect))
+            .collect();
+        assert_eq!(app.layout().leaves(), leaves);
+        assert_eq!(tiled_after, tiled_before, "tiled geometry is unchanged");
+        assert!(app.layout().is_floating(result.pane));
+        assert_eq!(app.layout().floating_rects()[0].0, result.pane);
+        assert!(app.panes.contains_key(&result.pane));
+        assert_eq!((result.workspace, result.tab), (0, 0));
+    }
+
+    #[test]
+    fn creating_a_floating_pane_without_a_command_spawns_a_shell() {
+        let _env = crate::persist::test_env("floating-create-shell");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let before = app.panes.len();
+
+        let result = app.float_pane(floating_request(None, None, true)).unwrap();
+
+        assert_eq!(app.panes.len(), before + 1);
+        assert!(app.panes.contains_key(&result.pane));
+        assert!(app.layout().is_floating(result.pane));
+        assert_eq!(app.layout().focus, result.pane);
+    }
+
+    #[test]
+    fn creating_a_floating_pane_targets_the_tab_of_the_target_pane() {
+        let _env = crate::persist::test_env("floating-create-target");
+        let root =
+            std::env::temp_dir().join(format!("luvus-floating-target-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(root.clone()));
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        let target = app.layout().focus;
+        app.active_ws = 0;
+        app.workspaces[0].active_tab = 0;
+
+        let result = app
+            .float_pane(floating_request(Some(target), None, true))
+            .unwrap();
+
+        assert_eq!((result.workspace, result.tab), (1, 1));
+        assert_eq!(app.pane_location(result.pane), Some((1, 1)));
+        assert_eq!(app.active_ws, 1);
+        assert_eq!(app.ws().active_tab, 1);
+        assert_eq!(app.layout().focus, result.pane);
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn creating_a_floating_pane_without_a_workspace_creates_one() {
+        let _env = crate::persist::test_env("floating-create-no-workspace");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        force_empty_session(&mut app);
+
+        let result = app.float_pane(floating_request(None, None, true)).unwrap();
+
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!((result.workspace, result.tab), (0, 0));
+        assert!(app.layout().is_floating(result.pane));
+        assert!(
+            !app.layout().leaves().contains(&result.pane),
+            "the new pane is floating, not tiled"
+        );
+    }
+
+    #[test]
+    fn a_dashboard_tab_rejects_a_floating_pane_before_spawning() {
+        let _env = crate::persist::test_env("floating-create-dashboard");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let placeholder = PaneId::alloc();
+        let mut tab = Tab::panes(TileLayout::new(placeholder));
+        tab.mission = true;
+        app.workspaces[0].tabs.push(tab);
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+        let before = app.panes.len();
+
+        let error = app
+            .float_pane(floating_request(Some(placeholder), None, true))
+            .unwrap_err();
+
+        assert_eq!(error, FloatingPaneError::TargetNotPaneTab);
+        assert_eq!(app.panes.len(), before, "no PTY is spawned");
+        assert!(app.layout().floating_rects().is_empty());
+    }
+
+    #[test]
+    fn an_invalid_floating_size_spawns_nothing() {
+        let _env = crate::persist::test_env("floating-invalid-size");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let before = app.panes.len();
+        let mut request = floating_request(None, None, true);
+        request.width = Some(2);
+
+        assert_eq!(
+            app.float_pane(request).unwrap_err(),
+            FloatingPaneError::InvalidGeometry
+        );
+        assert_eq!(app.panes.len(), before);
+        assert!(app.layout().floating_rects().is_empty());
+    }
+
+    #[test]
+    fn creating_a_floating_pane_without_focus_keeps_the_focused_pane() {
+        let _env = crate::persist::test_env("floating-create-no-focus");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+
+        let result = app.float_pane(floating_request(None, None, false)).unwrap();
+
+        assert_eq!(app.layout().focus, tiled);
+        assert_eq!(app.layout().tiled_focus, tiled);
+        assert_eq!(app.layout().floating_rects()[0].0, result.pane);
+    }
+
+    #[test]
+    fn creating_a_floating_pane_while_zoomed_unzooms() {
+        let _env = crate::persist::test_env("floating-create-zoomed");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.zoomed = true;
+
+        let result = app.float_pane(floating_request(None, None, true)).unwrap();
+
+        assert!(!app.zoomed);
+        assert_eq!(app.layout().focus, result.pane);
+        assert_eq!(app.layout().floating_rects()[0].0, result.pane);
+    }
+
+    #[test]
+    fn a_focused_floating_pane_returns_focus_when_its_command_exits() {
+        let _env = crate::persist::test_env("floating-exit-returns-focus");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(floating_request(None, Some(shell_command(&app)), true))
+            .unwrap()
+            .pane;
+        assert_eq!(app.layout().focus, floating);
+
+        app.handle_event(AppEvent::PtyExit(floating));
+
+        assert!(!app.panes.contains_key(&floating));
+        assert!(!app.layout().contains(floating));
+        assert_eq!(app.layout().focus, tiled);
+        assert_eq!(app.layout().tiled_focus, tiled);
+    }
+
+    #[test]
+    fn floating_focus_return_skips_a_dead_previous_pane() {
+        let _env = crate::persist::test_env("floating-focus-return-dead");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let previous = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let focused = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        app.close_pane(previous);
+        assert_eq!(app.layout().focus, focused);
+
+        app.handle_event(AppEvent::PtyExit(focused));
+        assert_eq!(
+            app.layout().focus,
+            tiled,
+            "the most recent live pane in the same tab"
+        );
+
+        // With no live history the tab's last focused tiled pane wins.
+        let last = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        app.focus_history_back.clear();
+        app.handle_event(AppEvent::PtyExit(last));
+        assert_eq!(app.layout().focus, tiled);
+    }
+
+    #[test]
+    fn closing_a_floating_pane_does_not_change_the_tiled_layout() {
+        let _env = crate::persist::test_env("floating-close-keeps-tiles");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let leaves = app.layout().leaves();
+        let floating = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+
+        app.close_pane(floating);
+
+        assert_eq!(app.layout().leaves(), leaves);
+        assert!(app.layout().floating_rects().is_empty());
+        assert!(!app.panes.contains_key(&floating));
+    }
+
+    #[test]
+    fn closing_the_last_tiled_pane_closes_its_floating_pane() {
+        let _env = crate::persist::test_env("floating-last-tiled-close");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(floating_request(None, None, false))
+            .unwrap()
+            .pane;
+
+        app.close_pane(tiled);
+
+        assert!(!app.panes.contains_key(&floating));
+        assert!(app.pane_location(floating).is_none());
+    }
+
+    #[test]
+    fn floating_cascade_restarts_after_the_last_floating_pane_closes() {
+        let _env = crate::persist::test_env("floating-cascade-restart");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let second = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let second_rect = app.layout().floating_rects()[0].1;
+        assert_eq!((second_rect.x, second_rect.y), (8, 4), "cascade step");
+
+        app.close_pane(first);
+        app.close_pane(second);
+        let third = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let third_rect = app.layout().floating_rects()[0].1;
+        assert_eq!((third_rect.x, third_rect.y), (4, 2), "cascade restarts");
+        assert_eq!(app.layout().focus, third);
     }
 }
 

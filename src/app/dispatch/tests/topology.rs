@@ -1519,6 +1519,108 @@ fn add_floating(app: &mut App, x: u16, y: u16, width: u16, height: u16, focus: b
     .pane
 }
 
+/// A floating pane follows the same event path as a tiled one: create and close
+/// publish `pane.created`/`pane.closed` with the same `{"pane": id}` shape.
+/// Ordinary focus is silent for both placements, so focus parity is by omission.
+#[test]
+fn floating_pane_lifecycle_events_match_tiled_panes() {
+    let (_env, mut app) = app("floating-event-parity");
+    let tiled = app.layout().focus;
+    let created = |pane: PaneId| {
+        (
+            "pane.created".to_string(),
+            json!({"pane": pane.0.to_string()}),
+        )
+    };
+    let closed = |pane: PaneId| {
+        (
+            "pane.closed".to_string(),
+            json!({"pane": pane.0.to_string()}),
+        )
+    };
+    let pane_events = |app: &App, floor: u64| {
+        crate::ipc::api::replayed_events_after(&app.events, floor)
+            .into_iter()
+            .filter_map(|event| {
+                let name = event["event"].as_str()?;
+                name.starts_with("pane.")
+                    .then(|| (name.to_string(), event["data"].clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    let split = app.dispatch("pane.split", &json!({})).unwrap();
+    let tiled_new = PaneId(split["pane"].as_str().unwrap().parse().unwrap());
+    assert_eq!(pane_events(&app, floor), vec![created(tiled_new)]);
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    app.dispatch("pane.focus", &json!({"pane": tiled_new.0.to_string()}))
+        .unwrap();
+    assert!(
+        pane_events(&app, floor).is_empty(),
+        "tiled focus emits no pane event"
+    );
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    let floating = app
+        .float_pane(FloatingPaneRequest {
+            target: None,
+            width: Some(20),
+            height: Some(6),
+            x: Some(4),
+            y: Some(2),
+            title: None,
+            focus: true,
+            command: Some(vec![crate::platform::resolve_shell(&app.config.shell)]),
+        })
+        .unwrap()
+        .pane;
+    assert_eq!(
+        pane_events(&app, floor),
+        vec![created(floating)],
+        "App::float_pane create matches a tiled pane"
+    );
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    app.dispatch("pane.focus", &json!({"pane": floating.0.to_string()}))
+        .unwrap();
+    assert!(
+        pane_events(&app, floor).is_empty(),
+        "floating focus emits no pane event"
+    );
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    let out = app
+        .dispatch(
+            "pane.float",
+            &json!({"width": 20, "height": 6, "focus": false}),
+        )
+        .unwrap();
+    let api_floating = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+    assert_eq!(
+        pane_events(&app, floor),
+        vec![created(api_floating)],
+        "pane.float create matches a tiled pane"
+    );
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    app.dispatch("pane.close", &json!({"pane": tiled_new.0.to_string()}))
+        .unwrap();
+    assert_eq!(pane_events(&app, floor), vec![closed(tiled_new)]);
+    for pane in [floating, api_floating] {
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        app.dispatch("pane.close", &json!({"pane": pane.0.to_string()}))
+            .unwrap();
+        assert_eq!(
+            pane_events(&app, floor),
+            vec![closed(pane)],
+            "floating close matches a tiled pane"
+        );
+    }
+    assert!(app.panes.contains_key(&tiled), "the tiled pane survives");
+}
+
 #[derive(Debug, PartialEq)]
 struct PaneState {
     leaves: Vec<PaneId>,

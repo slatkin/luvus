@@ -1532,6 +1532,121 @@ mod tests {
         assert_eq!(restored.panes.len(), 2);
     }
 
+    /// A tiled and a floating agent are equally live, but only the tiled one is
+    /// persisted: the live snapshot, agent list and terminal inventory include
+    /// both, while the saved file carries the tiled pane and its resume
+    /// metadata only.
+    #[test]
+    fn floating_agent_is_live_but_not_persisted() {
+        let _env = test_env("floating-agent-live-vs-persisted");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let shell = crate::platform::resolve_shell(&app.config.shell);
+        let floating = app
+            .float_pane(crate::app::FloatingPaneRequest {
+                target: None,
+                width: Some(20),
+                height: Some(6),
+                x: Some(4),
+                y: Some(2),
+                title: None,
+                focus: true,
+                command: Some(vec![shell]),
+            })
+            .expect("the floating agent terminal spawns")
+            .pane;
+        for (pane, session) in [(tiled, "sess-tiled"), (floating, "sess-floating")] {
+            let status = app.status.get_mut(&pane).expect("the pane has status");
+            status.agent = "claude".into();
+            status.state = crate::ui::theme::State::Working;
+            status.agent_session = Some(crate::app::AgentSession {
+                agent: "claude".into(),
+                session_id: session.into(),
+            });
+        }
+
+        let snapshot = app
+            .dispatch("session.snapshot", &serde_json::json!({}))
+            .expect("the live snapshot succeeds");
+        let rows = snapshot["workspaces"][0]["tabs"][0]["panes"]
+            .as_array()
+            .expect("the tab has snapshot rows");
+        let row = |pane: PaneId| {
+            let pane_id = pane.0.to_string();
+            rows.iter()
+                .find(|row| row["pane_id"].as_str() == Some(pane_id.as_str()))
+                .expect("the pane is in the live snapshot")
+        };
+        assert_eq!(row(tiled)["agent_session"], "sess-tiled");
+        assert_eq!(row(floating)["agent_session"], "sess-floating");
+        assert_eq!(row(floating)["floating"], true);
+
+        let agents = app
+            .dispatch("agent.list", &serde_json::json!({}))
+            .expect("the agent list succeeds");
+        let listed: Vec<&str> = agents["agents"]
+            .as_array()
+            .expect("the agent list has rows")
+            .iter()
+            .filter_map(|row| row["pane"].as_str())
+            .collect();
+        for pane in [tiled, floating] {
+            let pane_id = pane.0.to_string();
+            assert!(
+                listed.contains(&pane_id.as_str()),
+                "agent.list includes p{pane_id}"
+            );
+        }
+
+        let (reply, _response) = std::sync::mpsc::channel();
+        let inventory: serde_json::Value =
+            serde_json::from_str(&app.handle_api(&crate::ipc::api::ApiRequest {
+                id: "inventory".into(),
+                method: "terminal.backend.inventory".into(),
+                params: serde_json::json!({}),
+                reply,
+            }))
+            .expect("the inventory response is JSON");
+        let terminals = inventory["result"]["terminals"]
+            .as_array()
+            .expect("the inventory has terminals");
+        for pane in [tiled, floating] {
+            let pane_id = pane.0.to_string();
+            assert!(
+                terminals
+                    .iter()
+                    .any(|terminal| terminal["pane_id"].as_str() == Some(pane_id.as_str())),
+                "the inventory includes p{pane_id}"
+            );
+        }
+
+        assert!(save(&app));
+        let raw = fs::read_to_string(session_path()).unwrap();
+        assert!(
+            !raw.contains("sess-floating"),
+            "the floating agent resume metadata is never written"
+        );
+        let saved: SessionSnapshot = serde_json::from_str(&raw).unwrap();
+        let tab = &saved.workspaces[0].tabs[0];
+        assert!(matches!(&tab.tree, LayoutTree::Leaf(id) if *id == tiled.0));
+        assert_eq!(tab.focus, tiled.0, "focus is the tiled pane");
+        assert_eq!(
+            tab.panes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![tiled.0],
+            "only the tiled pane is saved"
+        );
+        let saved_tiled = &tab.panes[0].1;
+        assert_eq!(
+            saved_tiled
+                .agent_session
+                .as_ref()
+                .map(|(agent, session)| (agent.as_str(), session.as_str())),
+            Some(("claude", "sess-tiled")),
+            "the tiled agent keeps its resume metadata"
+        );
+    }
+
     // The control sockets grant command execution as the user, so the state
     // dir must be owner-only (0700) and each bound socket 0600 — regardless of
     // the process umask (see `ensure_config_dir` / `transport::bind`).

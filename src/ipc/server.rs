@@ -2490,12 +2490,12 @@ mod shutdown {
         target_os = "dragonfly"
     ))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        unsafe { libc::__error() }
+        libc::__error()
     }
 
     #[cfg(any(target_os = "linux", target_os = "hurd", target_os = "redox"))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        unsafe { libc::__errno_location() }
+        libc::__errno_location()
     }
 
     #[cfg(any(
@@ -2505,17 +2505,17 @@ mod shutdown {
         target_os = "nuttx"
     ))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        unsafe { libc::__errno() }
+        libc::__errno()
     }
 
     #[cfg(any(target_os = "solaris", target_os = "illumos"))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        unsafe { libc::___errno() }
+        libc::___errno()
     }
 
     #[cfg(target_os = "aix")]
     unsafe fn errno_location() -> *mut libc::c_int {
-        unsafe { libc::_Errno() }
+        libc::_Errno()
     }
 
     // libc exposes no common errno accessor across every possible `unix`
@@ -2537,7 +2537,7 @@ mod shutdown {
         target_os = "aix"
     )))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        unsafe { std::ptr::null_mut() }
+        std::ptr::null_mut()
     }
 
     fn set_cloexec(fd: RawFd) -> io::Result<()> {

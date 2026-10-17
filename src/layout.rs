@@ -226,7 +226,6 @@ impl TileLayout {
     }
 
     /// Every pane in the tab: tiled leaves, then floating panes top first.
-    #[allow(dead_code)]
     pub fn all_panes(&self) -> Vec<PaneId> {
         let mut v = self.leaves();
         v.extend(self.floating_rects().into_iter().map(|(id, _)| id));

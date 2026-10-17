@@ -7971,6 +7971,11 @@ impl App {
         // Detach only after every fallible check has passed. The pane remains in
         // `App.panes`; only its layout-tree parent changes.
         let emptied = self.workspaces[wsi].tabs[src].layout.remove(pane);
+        if emptied {
+            // The source tab has no tiled pane left, so its floating panes close
+            // with it instead of leaking behind a removed tab.
+            self.close_floating_panes_in(wsi, src);
+        }
         let final_tab = match target {
             MoveTarget::Tab(mut ti) => {
                 if emptied {
@@ -9969,14 +9974,13 @@ impl App {
         }
     }
 
-    fn close_active_tab(&mut self) {
-        let workspace_index = self.active_ws;
-        let tab_index = self.workspaces[self.active_ws].active_tab;
-        // A tab with floating panes still closes as soon as its tiled tree is
-        // empty, and its floating PTYs must end with it.
-        let floating = self.workspaces[workspace_index]
+    /// Close every floating pane of a tab through the ordinary close path, so
+    /// its PTY, runtime state, title and cascade state are released. The tab
+    /// must still exist; this never removes it itself.
+    fn close_floating_panes_in(&mut self, workspace: usize, tab: usize) {
+        let floating = self.workspaces[workspace]
             .tabs
-            .get(tab_index)
+            .get(tab)
             .map(|tab| {
                 tab.layout
                     .floating_rects()
@@ -9988,6 +9992,14 @@ impl App {
         for pane in floating {
             self.close_pane(pane);
         }
+    }
+
+    fn close_active_tab(&mut self) {
+        let workspace_index = self.active_ws;
+        let tab_index = self.workspaces[self.active_ws].active_tab;
+        // A tab with floating panes still closes as soon as its tiled tree is
+        // empty, and its floating PTYs must end with it.
+        self.close_floating_panes_in(workspace_index, tab_index);
         let ws = &mut self.workspaces[self.active_ws];
         let mut removed = false;
         if ws.active_tab < ws.tabs.len() {
@@ -10087,7 +10099,7 @@ impl App {
         let ids: Vec<PaneId> = self.workspaces[index]
             .tabs
             .iter()
-            .flat_map(|t| t.layout.leaves())
+            .flat_map(|t| t.layout.all_panes())
             .collect();
         for id in ids {
             self.drop_leaf_runtime(id);
@@ -10140,13 +10152,13 @@ impl App {
     /// Close a tab and all its panes (the "X" button / prefix+X).
     fn close_tab(&mut self, index: usize) {
         let workspace_index = self.active_ws;
-        let ids: Vec<PaneId> = {
-            let ws = &self.workspaces[self.active_ws];
-            if index >= ws.tabs.len() {
-                return;
-            }
-            ws.tabs[index].layout.leaves()
-        };
+        if index >= self.workspaces[self.active_ws].tabs.len() {
+            return;
+        }
+        // Floating panes have no tree leaf, so close their PTYs before the tab
+        // is dropped.
+        self.close_floating_panes_in(workspace_index, index);
+        let ids: Vec<PaneId> = self.workspaces[self.active_ws].tabs[index].layout.leaves();
         for id in ids {
             self.drop_leaf_runtime(id);
             self.release_leaf_ownership(id);
@@ -12078,6 +12090,54 @@ mod tests {
         app.handle_event(key('X', KeyModifiers::NONE)); // close the tab's only pane → tab drops
         assert_eq!(app.ws().tabs.len(), 1);
         assert!(app.panes.len() < before);
+    }
+
+    #[test]
+    fn closing_a_tab_with_a_floating_pane_closes_its_pty() {
+        let _env = crate::persist::test_env("close-tab-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, None, false))
+            .unwrap()
+            .pane;
+        let sequence = crate::ipc::api::current_sequence(&app.events);
+
+        app.close_tab(0);
+
+        assert!(!app.panes.contains_key(&floating));
+        assert!(app.pane_location(floating).is_none());
+        let events = crate::ipc::api::replayed_events_after(&app.events, sequence);
+        assert!(
+            events.iter().any(|event| {
+                event["event"] == "pane.closed"
+                    && event["data"]["pane"]
+                        .as_str()
+                        .and_then(|pane| pane.parse::<u32>().ok())
+                        == Some(floating.0)
+            }),
+            "closing the tab publishes pane.closed for its floating pane"
+        );
+    }
+
+    #[test]
+    fn moving_the_last_tiled_pane_closes_its_floating_panes() {
+        let _env = crate::persist::test_env("move-last-tiled-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].active_tab = 0;
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(floating_request(None, None, false))
+            .unwrap()
+            .pane;
+
+        app.move_pane_to_tab(tiled, MoveTarget::Tab(1))
+            .expect("target tab exists");
+
+        assert!(!app.panes.contains_key(&floating));
+        assert!(app.pane_location(floating).is_none());
     }
 
     #[test]

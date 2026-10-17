@@ -76,6 +76,20 @@
     },
     {
       "if": {
+        "required": ["result"],
+        "properties": { "result": { "required": ["type"], "properties": { "type": { "const": "pane" } } } }
+      },
+      "then": { "properties": { "result": { "$ref": "#/$defs/paneProjection" } } }
+    },
+    {
+      "if": {
+        "required": ["result"],
+        "properties": { "result": { "required": ["type"], "properties": { "type": { "const": "pane_list" } } } }
+      },
+      "then": { "properties": { "result": { "$ref": "#/$defs/paneListProjection" } } }
+    },
+    {
+      "if": {
         "required": ["error"],
         "properties": { "error": {
           "required": ["code", "data"],
@@ -203,6 +217,62 @@
           "properties": {
             "connections": { "type": "integer", "minimum": 1 },
             "requests_per_minute": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "paneRect": {
+      "description": "A floating pane rectangle in logical cells. Width and height respect the 3-cell minimum.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "y": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "width": { "type": "integer", "minimum": 3, "maximum": 65535 },
+        "height": { "type": "integer", "minimum": 3, "maximum": 65535 }
+      }
+    },
+    "panePlacement": {
+      "description": "Additive placement fields. Tiled panes report floating:false; floating panes report a rect and a z index where 0 is the top pane. Older servers omit every field, so none is required.",
+      "type": "object",
+      "properties": {
+        "floating": { "type": "boolean" },
+        "rect": { "$ref": "#/$defs/paneRect" },
+        "z": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        { "if": { "required": ["floating"], "properties": { "floating": { "const": true } } },
+          "then": { "required": ["rect", "z"] } },
+        { "if": { "required": ["rect"] },
+          "then": { "required": ["floating", "z"], "properties": { "floating": { "const": true } } } }
+      ]
+    },
+    "paneProjection": {
+      "description": "pane.float, pane.get and pane.current results. Placement fields are additive and other pane fields remain extensible.",
+      "type": "object",
+      "required": ["type", "pane"],
+      "properties": {
+        "type": { "const": "pane" },
+        "pane": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" },
+        "workspace": { "type": "string", "pattern": "^[0-9]+$" },
+        "tab": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" }
+      },
+      "allOf": [ { "$ref": "#/$defs/panePlacement" } ]
+    },
+    "paneListProjection": {
+      "description": "pane.list rows carry the additive floating, rect and z fields; other row fields remain extensible.",
+      "type": "object",
+      "required": ["type", "panes"],
+      "properties": {
+        "type": { "const": "pane_list" },
+        "panes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["pane"],
+            "properties": { "pane": { "type": "string", "pattern": "^[1-9][0-9]{0,9}$" } },
+            "allOf": [ { "$ref": "#/$defs/panePlacement" } ]
           }
         }
       }

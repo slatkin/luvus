@@ -106,6 +106,20 @@ def pane(value):
     return isinstance(value, str) and PANE.fullmatch(value) is not None
 
 
+def request_pane_id(value):
+    """Accept the nullable string or integer pane target of mutating requests."""
+    if value is None:
+        return True
+    if type(value) is int:
+        return 0 <= value <= 4294967295
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        digits = value.lstrip("0") or "0"
+        return len(digits) < 10 or (
+            len(digits) == 10 and digits <= "4294967295"
+        )
+    return False
+
+
 def bounded_string(value, maximum, allow_empty=True):
     return isinstance(value, str) and (allow_empty or bool(value)) and len(value) <= maximum
 
@@ -658,21 +672,36 @@ def valid_global_request(value, methods):
     if value["method"] == "events.subscribe":
         after = value["params"].get("after_sequence", 0)
         return integer(after) and after >= 0
+    if value["method"] == "pane.float":
+        params = value["params"]
+        if not set(params) <= {
+            "pane", "width", "height", "x", "y", "title", "focus", "command"
+        }:
+            return False
+        if not request_pane_id(params.get("pane")):
+            return False
+        for key, minimum in (("width", 3), ("height", 3), ("x", 0), ("y", 0)):
+            if key in params and (
+                not integer(params[key]) or not minimum <= params[key] <= 65535
+            ):
+                return False
+        if "title" in params and not isinstance(params["title"], str):
+            return False
+        if "focus" in params and type(params["focus"]) is not bool:
+            return False
+        if "command" in params:
+            command = params["command"]
+            if not isinstance(command, list) or not command:
+                return False
+            if not all(isinstance(item, str) and bool(item) for item in command):
+                return False
+        return True
     if value["method"] == "pane.transpose":
         params = value["params"]
-        target = params.get("pane")
         revision = params.get("if_revision", 0)
-        valid_target = target is None or (
-            type(target) is int and 0 <= target <= 4294967295
-        )
-        if isinstance(target, str) and target.isascii() and target.isdigit():
-            digits = target.lstrip("0") or "0"
-            valid_target = len(digits) < 10 or (
-                len(digits) == 10 and digits <= "4294967295"
-            )
         return (
             set(params) <= {"pane", "if_revision"}
-            and valid_target
+            and request_pane_id(params.get("pane"))
             and integer(revision)
             and revision >= 0
         )

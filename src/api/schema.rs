@@ -135,6 +135,53 @@ mod tests {
     }
 
     #[test]
+    fn pane_float_request_and_placement_contracts_are_strict() {
+        let bundle = schema_bundle();
+        let request = &bundle["request"];
+        let params = &request["$defs"]["paneFloatParams"];
+        assert_eq!(params["additionalProperties"], false);
+        assert!(params.get("required").is_none());
+        assert_eq!(params["properties"]["width"]["minimum"], 3);
+        assert_eq!(params["properties"]["height"]["minimum"], 3);
+        assert_eq!(params["properties"]["x"]["minimum"], 0);
+        assert_eq!(params["properties"]["y"]["minimum"], 0);
+        assert_eq!(params["properties"]["command"]["minItems"], 1);
+        assert!(request["allOf"].as_array().unwrap().iter().any(|branch| {
+            branch["if"]["properties"]["method"]["const"] == "pane.float"
+                && branch["then"]["properties"]["params"]["$ref"] == "#/$defs/paneFloatParams"
+        }));
+
+        let response = &bundle["response"];
+        let placement = &response["$defs"]["panePlacement"];
+        assert!(placement.get("required").is_none());
+        assert_eq!(placement["properties"]["floating"]["type"], "boolean");
+        assert_eq!(placement["properties"]["z"]["minimum"], 0);
+        assert_eq!(placement["properties"]["rect"]["$ref"], "#/$defs/paneRect");
+        assert_eq!(response["$defs"]["paneRect"]["additionalProperties"], false);
+        assert_eq!(
+            response["$defs"]["paneRect"]["properties"]["width"]["minimum"],
+            3
+        );
+        for kind in ["pane", "pane_list"] {
+            let reference = if kind == "pane" {
+                "#/$defs/paneProjection"
+            } else {
+                "#/$defs/paneListProjection"
+            };
+            assert!(response["allOf"].as_array().unwrap().iter().any(|branch| {
+                branch["if"]["properties"]["result"]["properties"]["type"]["const"] == kind
+                    && branch["then"]["properties"]["result"]["$ref"] == reference
+            }));
+            assert!(response["$defs"][reference.trim_start_matches("#/$defs/")].is_object());
+        }
+        assert_eq!(
+            crate::api::capabilities::required_scope("pane.float"),
+            "workspace"
+        );
+        assert!(!crate::api::capabilities::is_read_only("pane.float"));
+    }
+
+    #[test]
     fn task_start_request_contract_can_preserve_focus() {
         let bundle = schema_bundle();
         let params = &bundle["request"]["$defs"]["taskStartParams"];

@@ -9487,11 +9487,35 @@ impl App {
             || self.pane_title_rects.iter().any(|(_, rc)| hit(*rc, c, r))
     }
 
+    /// Whether `(c, r)` lands on a floating pane, border included.
+    ///
+    /// A floating pane covers the tiled seams under it. Its drawn rect is the
+    /// one the renderer stored in `pane_rects`, so this is the same geometry the
+    /// click and scroll hit tests use. Divider grabs must yield here, or a press
+    /// on a floating pane would resize the tiled split hidden beneath it.
+    fn on_floating_pane(&self, c: u16, r: u16) -> bool {
+        if self.pane_rects.is_empty() {
+            return false;
+        }
+        let layout = self.layout();
+        self.pane_rects.iter().any(|(id, rect)| {
+            layout.is_floating(*id)
+                && c >= rect.x
+                && c < rect.right()
+                && r >= rect.y
+                && r < rect.bottom()
+        })
+    }
+
     pub fn begin_resize(&mut self, c: u16, r: u16) -> bool {
         // Pane border chrome (title, ⤢ zoom, ✕ close) always wins the click, even
         // though it sits on the seam a resize would otherwise grab. This keeps
         // title focus and the two buttons reliable on stacked splits.
-        if self.active_is_git() || self.active_is_orch() || self.on_pane_chrome(c, r) {
+        if self.active_is_git()
+            || self.active_is_orch()
+            || self.on_pane_chrome(c, r)
+            || self.on_floating_pane(c, r)
+        {
             return false;
         }
         // A cell inside a pane's *content* belongs to the pane, never to the
@@ -9523,7 +9547,11 @@ impl App {
     /// Start a drag of the divider nearest `(c, r)` — the `Ctrl`+drag path
     /// (RESIZE-5). Skips a pane that tracks the mouse itself (a TUI agent).
     pub fn begin_resize_nearest(&mut self, c: u16, r: u16) -> bool {
-        if self.active_is_git() || self.active_is_orch() || self.on_pane_chrome(c, r) {
+        if self.active_is_git()
+            || self.active_is_orch()
+            || self.on_pane_chrome(c, r)
+            || self.on_floating_pane(c, r)
+        {
             return false;
         }
         let over_mouse_app = self
@@ -9578,6 +9606,7 @@ impl App {
             if self.active_is_git()
                 || self.active_is_orch()
                 || self.on_pane_chrome(c, r)
+                || self.on_floating_pane(c, r)
                 || self.pane_content_at(c, r).is_some()
             {
                 None
@@ -10585,6 +10614,23 @@ mod tests {
             reply,
         }))
         .unwrap()
+    }
+
+    /// A floating request with explicit outer geometry, in pane-area cells.
+    fn floating_geometry(
+        (x, y, width, height): (u16, u16, u16, u16),
+        focus: bool,
+    ) -> FloatingPaneRequest {
+        FloatingPaneRequest {
+            target: None,
+            width: Some(width),
+            height: Some(height),
+            x: Some(x),
+            y: Some(y),
+            title: None,
+            focus,
+            command: None,
+        }
     }
 
     fn floating_request(
@@ -21961,6 +22007,323 @@ fi
         let third_rect = app.layout().floating_rects()[0].1;
         assert_eq!((third_rect.x, third_rect.y), (4, 2), "cascade restarts");
         assert_eq!(app.layout().focus, third);
+    }
+
+    /// A floating pane covers the tiled divider beneath it: a press there must
+    /// not grab the hidden seam. The exposed part of the same seam still resizes.
+    #[test]
+    fn a_floating_pane_blocks_the_divider_resize_under_it() {
+        let _env = crate::persist::test_env("floating-divider-blocked");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.layout().len(), 2);
+
+        let area = app.last_pane_area;
+        let row = area.y + 3;
+        let mut seam = None;
+        for x in area.x..area.right() {
+            if app.begin_resize(x, row) {
+                seam = Some(x);
+                app.end_resize();
+                break;
+            }
+        }
+        let seam = seam.expect("a divider grabs between the two tiled panes");
+
+        // Cover the seam with a floating pane, rows 0..10 of the pane area.
+        let floating = app
+            .float_pane(floating_geometry(
+                (seam.saturating_sub(area.x).saturating_sub(5), 0, 20, 10),
+                false,
+            ))
+            .unwrap()
+            .pane;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let rect = app
+            .pane_rects
+            .iter()
+            .find(|(id, _)| *id == floating)
+            .map(|(_, rect)| *rect)
+            .expect("the floating pane is drawn");
+        assert!(
+            seam >= rect.x && seam < rect.right() && row >= rect.y && row < rect.bottom(),
+            "the floating pane covers the seam cell"
+        );
+
+        assert!(
+            !app.begin_resize(seam, row),
+            "a covered divider must not start a resize"
+        );
+        assert!(app.resize_drag.is_none());
+        assert!(
+            !app.begin_resize_nearest(seam, row),
+            "the Ctrl+drag path yields to a floating pane too"
+        );
+        assert!(app.resize_drag.is_none());
+
+        // The same seam below the floating pane still grabs.
+        let exposed = rect.bottom() + 1;
+        assert!(exposed < area.bottom());
+        assert!(
+            app.begin_resize(seam, exposed),
+            "an uncovered seam still resizes"
+        );
+        app.end_resize();
+    }
+
+    /// A floating pane hides the focused tiled pane's ✕ and ⤢ buttons. Covered
+    /// chrome must not fire; the press focuses the pane that is actually on top.
+    #[test]
+    fn a_floating_pane_blocks_the_covered_tiled_chrome() {
+        let _env = crate::persist::test_env("floating-covered-chrome");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let tiled = app.layout().focus;
+        let close = app.pane_close_rect.expect("focused tiled pane has a ✕");
+        let zoom = app.pane_zoom_rect.expect("focused tiled pane has a ⤢");
+        let area = app.last_pane_area;
+        // One floating pane covers both buttons on the tiled pane's top border.
+        let left = close.x.min(zoom.x).saturating_sub(2);
+        let floating = app
+            .float_pane(floating_geometry(
+                (
+                    left.saturating_sub(area.x),
+                    close.y.saturating_sub(area.y),
+                    24,
+                    8,
+                ),
+                false,
+            ))
+            .unwrap()
+            .pane;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.layout().focus, tiled, "no-focus keeps the tiled pane");
+        assert_eq!(app.pane_close_rect, Some(close));
+        assert_eq!(app.pane_zoom_rect, Some(zoom));
+
+        let click = |app: &mut App, at: (u16, u16)| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: at.0,
+                row: at.1,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        click(&mut app, (close.x + 1, close.y));
+        assert_eq!(
+            app.layout().leaves().len(),
+            2,
+            "the covered ✕ closed nothing"
+        );
+        assert!(app.panes.contains_key(&tiled));
+        assert_eq!(app.layout().focus, floating, "the top pane takes the press");
+
+        // Back to the tiled pane, then the covered ⤢ must not zoom it either.
+        app.focus_pane_global(tiled);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.pane_zoom_rect, Some(zoom));
+        click(&mut app, (zoom.x + 1, zoom.y));
+        assert!(!app.zoomed, "the covered ⤢ did not zoom the tiled pane");
+        assert_eq!(app.layout().leaves().len(), 2);
+    }
+
+    /// The focused floating pane owns its own ✕ and ⤢ buttons.
+    #[test]
+    fn a_focused_floating_panes_chrome_works() {
+        let _env = crate::persist::test_env("floating-focused-chrome");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(floating_geometry((10, 4, 30, 8), true))
+            .unwrap()
+            .pane;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let rect = app
+            .pane_rects
+            .iter()
+            .find(|(id, _)| *id == floating)
+            .map(|(_, rect)| *rect)
+            .expect("the floating pane is drawn");
+        let close = app.pane_close_rect.expect("focused floating pane has a ✕");
+        let zoom = app.pane_zoom_rect.expect("focused floating pane has a ⤢");
+        assert!(
+            close.x >= rect.x
+                && close.right() <= rect.right()
+                && zoom.x >= rect.x
+                && zoom.right() <= rect.right(),
+            "the chrome belongs to the floating pane"
+        );
+
+        let click = |app: &mut App, at: (u16, u16)| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: at.0,
+                row: at.1,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        click(&mut app, (zoom.x + 1, zoom.y));
+        assert!(app.zoomed, "the floating pane zooms");
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let restore = app.pane_zoom_rect.expect("the zoomed pane keeps its ⤡");
+        click(&mut app, (restore.x + 1, restore.y));
+        assert!(!app.zoomed, "the second tap restores the floating size");
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let close = app.pane_close_rect.expect("focused floating pane has a ✕");
+        click(&mut app, (close.x + 1, close.y));
+        assert!(!app.panes.contains_key(&floating), "the ✕ closed it");
+        assert_eq!(app.layout().leaves(), vec![tiled]);
+    }
+
+    /// Switching away and back keeps each floating pane's geometry, stacking
+    /// order and process, and its tab is the only one that draws it.
+    #[test]
+    fn tab_switch_with_floating_panes_keeps_them() {
+        let _env = crate::persist::test_env("floating-tab-switch");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let floating = app
+            .float_pane(floating_geometry((10, 4, 30, 8), true))
+            .unwrap()
+            .pane;
+        let stored = app.layout().floating_rects();
+        assert_eq!(stored.len(), 1);
+
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            app.pane_rects.iter().all(|(id, _)| *id != floating),
+            "another tab does not draw the floating pane"
+        );
+
+        app.run_cmd(crate::app::keys::Cmd::PrevTab);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.ws().active_tab, 0);
+        assert_eq!(
+            app.layout().floating_rects(),
+            stored,
+            "size, position and stacking order survive the switch"
+        );
+        assert!(
+            app.panes.contains_key(&floating),
+            "the floating process stays alive"
+        );
+        assert!(
+            app.pane_rects.iter().any(|(id, _)| *id == floating),
+            "the owning tab draws it again"
+        );
+    }
+
+    /// Plain keys go to the focused pane. A visible floating pane must not take
+    /// input meant for the focused tiled pane.
+    #[test]
+    fn keys_go_to_the_focused_tiled_pane() {
+        let _env = crate::persist::test_env("floating-keys-tiled");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(floating_geometry((10, 4, 30, 8), false))
+            .unwrap()
+            .pane;
+        assert_eq!(app.layout().focus, tiled);
+        let (tiled_tx, tiled_rx) = mpsc::channel();
+        let (floating_tx, floating_rx) = mpsc::channel();
+        app.panes
+            .get_mut(&tiled)
+            .unwrap()
+            .replace_input_sender_for_test(tiled_tx);
+        app.panes
+            .get_mut(&floating)
+            .unwrap()
+            .replace_input_sender_for_test(floating_tx);
+
+        for character in ['l', 's'] {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            )));
+        }
+
+        let mut typed = Vec::new();
+        while let Ok(crate::terminal::pty::InputAction::Bytes(bytes)) = tiled_rx.try_recv() {
+            typed.extend(bytes);
+        }
+        assert_eq!(typed, b"ls", "the tiled pane receives the typing");
+        assert!(
+            floating_rx.try_recv().is_err(),
+            "the floating pane receives nothing"
+        );
+    }
+
+    /// The prefix still works while a floating pane is focused: a new tab opens
+    /// and the floating pane stays in its own tab.
+    #[test]
+    fn prefix_while_a_floating_pane_is_focused_opens_a_tab() {
+        let _env = crate::persist::test_env("floating-prefix-tab");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(floating_geometry((10, 4, 30, 8), true))
+            .unwrap()
+            .pane;
+        assert_eq!(app.layout().focus, floating);
+        let stored = app.layout().floating_rects();
+        let tabs = app.ws().tabs.len();
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.mode, Mode::Prefix);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(app.ws().tabs.len(), tabs + 1, "the prefix opened a tab");
+        assert_eq!(app.ws().active_tab, tabs);
+        assert_eq!(
+            app.pane_location(floating),
+            Some((0, 0)),
+            "the floating pane stays in its own tab"
+        );
+        assert_eq!(app.workspaces[0].tabs[0].layout.floating_rects(), stored);
+        assert!(app.panes.contains_key(&floating));
     }
 }
 

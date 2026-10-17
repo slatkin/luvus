@@ -1481,7 +1481,10 @@ fn capture_visible_terminal_generations(
     {
         return;
     }
-    let pane_ids = app.layout().leaves();
+    // Floating panes draw above the tiled layer and carry their own damage, so
+    // capture and acknowledge both layers here; the damage fast path compares
+    // the same set against its client content rects.
+    let pane_ids = app.layout().all_panes();
     generations.reserve(pane_ids.len());
     for id in pane_ids {
         let Some(pane) = app.panes.get(&id) else {
@@ -1505,7 +1508,7 @@ fn capture_visible_terminal_damage(
     {
         return;
     }
-    let pane_ids = app.layout().leaves();
+    let pane_ids = app.layout().all_panes();
     snapshots.reserve(pane_ids.len());
     for id in pane_ids {
         let Some(pane) = app.panes.get(&id) else {
@@ -2487,12 +2490,12 @@ mod shutdown {
         target_os = "dragonfly"
     ))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        libc::__error()
+        unsafe { libc::__error() }
     }
 
     #[cfg(any(target_os = "linux", target_os = "hurd", target_os = "redox"))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        libc::__errno_location()
+        unsafe { libc::__errno_location() }
     }
 
     #[cfg(any(
@@ -2502,17 +2505,17 @@ mod shutdown {
         target_os = "nuttx"
     ))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        libc::__errno()
+        unsafe { libc::__errno() }
     }
 
     #[cfg(any(target_os = "solaris", target_os = "illumos"))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        libc::___errno()
+        unsafe { libc::___errno() }
     }
 
     #[cfg(target_os = "aix")]
     unsafe fn errno_location() -> *mut libc::c_int {
-        libc::_Errno()
+        unsafe { libc::_Errno() }
     }
 
     // libc exposes no common errno accessor across every possible `unix`
@@ -2534,7 +2537,7 @@ mod shutdown {
         target_os = "aix"
     )))]
     unsafe fn errno_location() -> *mut libc::c_int {
-        std::ptr::null_mut()
+        unsafe { std::ptr::null_mut() }
     }
 
     fn set_cloexec(fd: RawFd) -> io::Result<()> {

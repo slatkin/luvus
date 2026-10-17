@@ -60,7 +60,7 @@ never follows a moved terminal implicitly for a write.
 
 | Capability | Method | Behavior |
 |---|---|---|
-| `inventory` | `terminal.backend.inventory` | Every started PTY across ordinary tabs, with route, cwd, title, label, PID, and start marker |
+| `inventory` | `terminal.backend.inventory` | Every started PTY across ordinary tabs, including floating panes, with route, cwd, title, label, PID, and start marker |
 | `validate` | `terminal.backend.validate` | Returns `alive`, `gone`, or `unknown` without mutating state |
 | `process_inspection` | `terminal.backend.processes` | Cached executable identities under a validated root; never full argv |
 | `capture` | `terminal.backend.capture` | Bounded `visible`, `recent_unwrapped`, or detection text; optional safe SGR for the first two; recent capture includes passively retained alternate-screen rows |

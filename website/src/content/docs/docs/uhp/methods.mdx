@@ -245,6 +245,11 @@ position that changes when workspaces are reordered or an earlier one closes,
 also published by `workspace.list` and `workspace.get`. Filter or correlate on
 `workspace_id` when the result has to survive those changes.
 
+`agent.list` includes agents that run in floating panes. Each such row is a full
+agent row, addressed by its pane ID like any other. A lookup by agent kind that
+matches one tiled and one floating agent is ambiguous, the same as two matches
+in tiled panes.
+
 `agent.list` rows and the `agent.get` result include `agent_session_title`, the
 same live session title that `session.snapshot` reports for that pane. It is a
 single line of at most 160 characters, or `null` when no title is available.
@@ -366,7 +371,10 @@ task and report `delivered` after the prompt reaches the pane input queue.
 
 `agent.list` returns the stable `workspace_id` and process-lifetime
 `terminal_id` on each live agent row so clients can construct this target
-without consulting terminal-backend methods.
+without consulting terminal-backend methods. Active-agent choices include
+agents in floating panes. Orchestration reuses a floating active agent in place,
+but a new worker pane belongs to the tab's tiled tree and is never split from a
+floating pane.
 
 The read-only methods require the `read` scope. Every mutating automation
 method requires `orchestration`. A remote client should discover this contract
@@ -572,7 +580,14 @@ resynchronization rules.
 `uhp.capabilities` negotiates the app-level automation surface and its
 limits. `session.snapshot` returns every workspace, tab, terminal pane, native
 view, stable terminal identity, root process, and agent state in one response.
-It includes the current event sequence, so a consumer can subscribe first and
+It includes floating panes. A floating pane row has `floating:true`, its outer
+`rect` (`x`, `y`, `width`, and `height` in cells), and `z`, where 0 is the top
+floating pane; `focused` is true when it holds focus. This is the live snapshot
+only: the saved session file excludes floating panes, so a restart restores
+tiled panes and tiled focus only. The terminal backend inventory also lists a
+floating pane's terminal, and that terminal can be observed and controlled
+through its validated identity. Luvus Web may omit floating panes. The snapshot
+includes the current event sequence, so a consumer can subscribe first and
 reconcile later events without a snapshot race. Neither method reads terminal
 text or starts a process.
 
@@ -826,7 +841,8 @@ Luvus during named-session handoff. Invalid or stale targets return a structured
 `mission.snapshot` returns the dashboard's live and resumable agent rows,
 states, locations, structured usage counters, aggregate tokens and cost, and a
 read-only `automation` health object with definition, scheduled, live, review,
-failed, and next-run counts/deadline.
+failed, and next-run counts/deadline. Rows include agents in floating panes, and
+their usage is read like any other live row.
 It deliberately omits native session IDs and blocked-output snippets. It does
 not open Mission Control or change focus.
 
@@ -1015,7 +1031,9 @@ remain available for compatibility.
 
 `target` is a live alias, numeric pane ID, or a unique agent kind. Luvus uses
 the agent's native fork command and creates the sibling to the right of the
-source pane in that pane's own workspace and tab. The parent stays running.
+source pane in that pane's own workspace and tab. The parent stays running. An
+agent in a floating pane cannot be forked: `agent.fork` returns
+`invalid_request` with message `pane is floating`.
 `name` optionally assigns the new fork a live alias. `focus` defaults to `true`;
 when false, the current workspace, tab, pane focus, and zoom state are preserved.
 
@@ -1363,6 +1381,9 @@ with future additive names. Register the returned `documents` by `$id` and
 resolve an entry from the catalog document, for example
 `https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json#/properties/pane.agent_status_changed`;
 do not detach a fragment that contains a local `$ref` from its root document.
+
+Floating panes emit the same `pane.created`, `pane.closed`, and other pane
+events as tiled panes. Ordinary focus emits no pane event for either placement.
 
 `terminal.backend.events.subscribe` uses the same stream framing but filters to
 `terminal.*` events. Its acknowledgment includes the current sequence and queue

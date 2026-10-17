@@ -305,7 +305,9 @@ inspect its layout before retrying: transposing twice restores the original.
 Floating panes are overlays above the tiled tree. Use `pane float` when a pane
 should cover part of the tab without changing its tiled layout; split,
 transpose, swap, move, and resize reject a floating pane, while focus, close,
-run, send, and read still work.
+run, send, and read still work. To an agent surface a floating pane is an
+ordinary pane: `pane list` reports its `floating`, `rect`, and `z` placement,
+and agent list, read, send, and wait work by pane id.
 
 Examples of explicit mutations, only when requested:
 

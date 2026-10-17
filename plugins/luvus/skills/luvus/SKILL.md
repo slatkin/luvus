@@ -389,7 +389,9 @@ To run an ordinary command beside an explicit pane without stealing focus,
 choose `pane split` for a tiled helper or `pane float` for an overlay above the
 tiled tree. Floating panes do not change the tiled layout; split, transpose,
 swap, move, and resize reject a floating pane, while focus, close, run, send,
-and read still work.
+and read still work. To an agent surface a floating pane is an ordinary pane:
+`pane list` reports its `floating`, `rect`, and `z` placement, and agent list,
+read, send, and wait work by pane id.
 
 ```sh
 luvus pane split <anchor-pane-id> --no-focus

@@ -5772,6 +5772,13 @@ impl App {
         focus: bool,
         cwd: Option<PathBuf>,
     ) -> Option<PaneId> {
+        // The by-id entry point must reject a floating target even when a caller
+        // bypasses the API guard (a commander `@pN:sv` mentions the pane id
+        // directly). Splitting the tile behind it would report the floating pane
+        // as split and change state the request never named.
+        if self.reject_tiled_only_floating(pane) {
+            return None;
+        }
         let (wsi, ti) = self.pane_location(pane)?;
         // Resolve the candidate chain up front (explicit cwd or target pane → target workspace
         // root → $HOME, existing only) and hand the primary plus its fallbacks to
@@ -17687,6 +17694,50 @@ fi
             app.fork_agent_pane(floating, true),
             Err(AgentForkError::FloatingPane)
         );
+    }
+
+    /// The by-id split entry point rejects a floating target, so a caller that
+    /// bypasses the API guard cannot create a sibling by splitting the tile
+    /// behind the floating pane or move focus there.
+    #[test]
+    fn split_pane_by_id_rejects_a_floating_target() {
+        let _env = crate::persist::test_env("floating-split-by-id");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+        let tree = serde_json::to_vec(&app.layout().to_tree()).unwrap();
+        let panes = app.panes.len();
+        let notice = app.catalog.floating_tiled_only;
+
+        assert_eq!(app.split_pane(floating, Axis::Col, true), None);
+        assert_eq!(app.split_pane_in(floating, Axis::Row, true, None), None);
+        assert_eq!(app.panes.len(), panes, "no pane is created");
+        assert_eq!(
+            serde_json::to_vec(&app.layout().to_tree()).unwrap(),
+            tree,
+            "the tiled tree is unchanged"
+        );
+        assert_eq!(
+            app.layout().focus,
+            floating,
+            "focus keeps the floating pane"
+        );
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some(notice)
+        );
+
+        // A tiled target still splits through the same entry point.
+        let new = app
+            .split_pane(tiled, Axis::Col, true)
+            .expect("the tiled pane splits");
+        assert!(app.panes.contains_key(&new));
+        assert_eq!(app.layout().leaves().len(), 2);
+        assert_eq!(app.layout().focus, new);
     }
 
     /// Moving a pane to another tab re-parents its id between layout trees — the

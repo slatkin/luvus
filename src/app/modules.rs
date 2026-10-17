@@ -23,6 +23,19 @@ pub struct ModuleMenuAction {
     pub title: String,
 }
 
+/// Resolve a module pane's placement. An explicit caller placement wins;
+/// otherwise only a `floating` entry placement applies. Every other entry value
+/// (`tab`, `overlay`, `split`, or unknown) keeps the longstanding `split`
+/// default, so an existing manifest does not change how it opens without a
+/// flag.
+fn module_pane_placement<'a>(placement: Option<&'a str>, entry: &'a str) -> &'a str {
+    match placement {
+        Some(placement) => placement,
+        None if entry == "floating" => "floating",
+        None => "split",
+    }
+}
+
 impl App {
     /// Resolve a module `spec` (its id, or the `owner/repo[/sub]` shorthand it
     /// was installed with) to its canonical id.
@@ -526,8 +539,9 @@ impl App {
     }
 
     /// Open a module's `[[panes]]` entrypoint as a real luvus pane (MOD-2),
-    /// placed per `placement` (split | overlay | tab | floating; default from
-    /// the entry, else split). Returns the new pane id.
+    /// placed per `placement` (split | overlay | tab | floating). An explicit
+    /// placement wins; otherwise the entry placement applies only when it is
+    /// `floating`, else the pane splits. Returns the new pane id.
     pub fn module_open_pane(
         &mut self,
         module_id: &str,
@@ -557,7 +571,7 @@ impl App {
                 .ok_or_else(|| format!("module {module_id} has no pane {entrypoint}"))?
         };
         let argv = entry.command.clone();
-        let placement = placement.unwrap_or(entry.placement.as_str());
+        let placement = module_pane_placement(placement, entry.placement.as_str());
         let floating = if placement == "floating" {
             Some(self.module_floating_geometry(&module_id, &entry)?)
         } else {
@@ -1353,6 +1367,109 @@ command = ["sh", "prompt.sh"]
         assert!(app.layout().floating_rects().is_empty());
         assert!(app.module_panes.is_empty());
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_entry_tab_placement_without_a_flag_still_splits() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("luvus-entrytab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let manifest =
+            FLOATING_PANE_MANIFEST.replace("placement = \"floating\"", "placement = \"tab\"");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link_prompt_module(&mut app, &home, &manifest);
+
+        let pid = app
+            .module_open_pane("you.prompt", "prompt", None, "test")
+            .expect("the module pane opens");
+
+        // The base resolved an ignored entry placement to split.
+        assert!(app.layout().leaves().contains(&pid), "the pane is tiled");
+        assert!(!app.layout().is_floating(pid));
+        assert!(app.layout().floating_rects().is_empty());
+        assert!(!app.zoomed);
+        assert_eq!(app.workspaces[0].tabs.len(), 1, "no new tab was opened");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_entry_overlay_placement_without_a_flag_still_splits() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("luvus-entryoverlay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let manifest =
+            FLOATING_PANE_MANIFEST.replace("placement = \"floating\"", "placement = \"overlay\"");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link_prompt_module(&mut app, &home, &manifest);
+
+        let pid = app
+            .module_open_pane("you.prompt", "prompt", None, "test")
+            .expect("the module pane opens");
+
+        // The base ignored the entry value, so the pane splits unzoomed.
+        assert!(app.layout().leaves().contains(&pid), "the pane is tiled");
+        assert!(!app.layout().is_floating(pid));
+        assert!(!app.zoomed, "the entry overlay did not zoom the tab");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_explicit_placement_overrides_a_floating_entry() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("luvus-floatexplicit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("LUVUS_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link_prompt_module(&mut app, &home, FLOATING_PANE_MANIFEST);
+
+        let pid = app
+            .module_open_pane("you.prompt", "prompt", Some("split"), "test")
+            .expect("the module pane opens");
+
+        assert!(app.layout().leaves().contains(&pid), "the pane is tiled");
+        assert!(!app.layout().is_floating(pid));
+        assert!(
+            app.layout().floating_rects().is_empty(),
+            "the entry width, height, x and y were ignored"
+        );
+        assert!(!app.zoomed);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn example_manifests_keep_the_base_split_default_without_a_flag() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in [
+            "examples/modules/deck/luvus-module.toml",
+            "examples/modules/esp-idf/luvus-module.toml",
+        ] {
+            let text = std::fs::read_to_string(root.join(relative))
+                .unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
+            let manifest: ModuleManifest =
+                toml::from_str(&text).unwrap_or_else(|e| panic!("cannot parse {relative}: {e}"));
+            assert!(!manifest.panes.is_empty(), "{relative} declares panes");
+            for entry in &manifest.panes {
+                assert_eq!(entry.placement, "tab", "{relative} keeps its entry value");
+                assert_eq!(
+                    module_pane_placement(None, &entry.placement),
+                    "split",
+                    "{relative} opens at the base placement without a flag"
+                );
+                assert_eq!(
+                    module_pane_placement(Some("tab"), &entry.placement),
+                    "tab",
+                    "{relative} keeps an explicit caller placement"
+                );
+            }
+        }
     }
 
     #[test]

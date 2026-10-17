@@ -101,6 +101,25 @@ pub(in crate::app::dispatch) fn workspace_update_error(
     }
 }
 
+pub(in crate::app::dispatch) fn floating_pane_error(err: FloatingPaneError) -> (String, String) {
+    let (code, message) = match err {
+        FloatingPaneError::PaneNotFound => ("not_found", "pane not found"),
+        FloatingPaneError::TargetNotPaneTab => (
+            "invalid_request",
+            "target tab does not accept floating panes",
+        ),
+        FloatingPaneError::InvalidGeometry => (
+            "invalid_request",
+            "floating pane size must be at least 3 by 3",
+        ),
+        FloatingPaneError::SpawnFailed => (
+            "spawn_failed",
+            "could not create a terminal in the home directory",
+        ),
+    };
+    (code.to_string(), message.to_string())
+}
+
 pub(in crate::app::dispatch) fn agent_fork_error(err: AgentForkError) -> (String, String) {
     let (code, message) = match err {
         AgentForkError::PaneNotFound => ("not_found", "agent pane not found"),
@@ -442,6 +461,28 @@ pub(in crate::app::dispatch) fn parse_u32_value(
                 format!("{key} must be a pane id"),
             )
         })
+}
+
+/// Optional non-negative cell coordinate or size. Numbers and numeric strings
+/// are accepted, like pane ids; anything outside `u16` is a request error.
+pub(in crate::app::dispatch) fn optional_u16_param(
+    p: &Value,
+    key: &str,
+) -> Result<Option<u16>, (String, String)> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+            .and_then(|value| u16::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                (
+                    "invalid_request".to_string(),
+                    format!("{key} must be an integer between 0 and 65535"),
+                )
+            }),
+    }
 }
 
 pub(in crate::app::dispatch) fn optional_workspace_param(

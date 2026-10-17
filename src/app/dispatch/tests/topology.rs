@@ -1501,3 +1501,332 @@ fn rename_pane_is_offered_in_both_menus() {
     let pane = app.layout().focus;
     assert!(AgentMenu::items_for(AgentTarget::Live(pane)).contains(&AgentMenuItem::RenamePane));
 }
+
+// ── floating panes: pane.float, tiled-only rejections and projections ──
+
+fn add_floating(app: &mut App, x: u16, y: u16, width: u16, height: u16, focus: bool) -> PaneId {
+    app.float_pane(FloatingPaneRequest {
+        target: None,
+        width: Some(width),
+        height: Some(height),
+        x: Some(x),
+        y: Some(y),
+        title: None,
+        focus,
+        command: None,
+    })
+    .unwrap()
+    .pane
+}
+
+#[derive(Debug, PartialEq)]
+struct PaneState {
+    leaves: Vec<PaneId>,
+    floating: Vec<(PaneId, ratatui::layout::Rect)>,
+    focus: PaneId,
+    tiled_focus: PaneId,
+    panes: usize,
+    zoomed: bool,
+}
+
+fn pane_state(app: &App) -> PaneState {
+    PaneState {
+        leaves: app.layout().leaves(),
+        floating: app.layout().floating_rects(),
+        focus: app.layout().focus,
+        tiled_focus: app.layout().tiled_focus,
+        panes: app.panes.len(),
+        zoomed: app.zoomed,
+    }
+}
+
+#[test]
+fn pane_float_creates_with_explicit_size_and_position() {
+    let (_env, mut app) = app("pane-float-explicit");
+    let tiled = app.layout().focus;
+
+    let out = app
+        .dispatch(
+            "pane.float",
+            &json!({
+                "width": 50, "height": 12, "x": 10, "y": 3,
+                "title": "Pick a branch", "focus": true,
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(out["type"], "pane");
+    assert_eq!(out["workspace"], "0");
+    assert_eq!(out["tab"], "1");
+    let pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+    assert_eq!(app.pane_location(pane), Some((0, 0)));
+    assert!(app.layout().is_floating(pane));
+    let rects = app.layout().floating_rects();
+    assert_eq!(rects[0].0, pane);
+    assert_eq!(rects[0].1, ratatui::layout::Rect::new(10, 3, 50, 12));
+    assert_eq!(app.layout().focus, pane);
+    assert_eq!(app.layout().tiled_focus, tiled);
+    assert_eq!(app.floating_title(pane), Some("Pick a branch"));
+    assert_eq!(app.layout().leaves(), vec![tiled]);
+}
+
+#[test]
+fn pane_float_targets_the_tab_of_the_target_pane() {
+    let (_env, mut app) = app("pane-float-target");
+    app.run_cmd(crate::app::keys::Cmd::NewTab);
+    let target = app.layout().focus;
+
+    let out = app
+        .dispatch(
+            "pane.float",
+            &json!({"pane": target.0.to_string(), "width": 20, "height": 5}),
+        )
+        .unwrap();
+
+    assert_eq!(out["workspace"], "0");
+    assert_eq!(out["tab"], "2");
+    assert_eq!(
+        app.pane_location(PaneId(out["pane"].as_str().unwrap().parse().unwrap())),
+        Some((0, 1))
+    );
+}
+
+#[test]
+fn pane_float_validates_before_spawning() {
+    let (_env, mut app) = app("pane-float-invalid");
+    let panes = app.panes.len();
+    let workspaces = app.workspaces.len();
+
+    for params in [
+        json!({"width": 2}),
+        json!({"height": 2}),
+        json!({"width": -1}),
+        json!({"width": "wide"}),
+        json!({"x": -1}),
+        json!({"focus": "yes"}),
+        json!({"title": 7}),
+        json!({"command": "htop"}),
+        json!({"command": []}),
+        json!({"command": [""]}),
+        json!({"unknown": true}),
+    ] {
+        let error = app.dispatch("pane.float", &params).unwrap_err();
+        assert_eq!(error.0, "invalid_request", "params: {params}");
+        assert_eq!(app.panes.len(), panes, "params: {params}");
+        assert_eq!(app.workspaces.len(), workspaces, "params: {params}");
+        assert!(app.layout().floating_rects().is_empty(), "params: {params}");
+    }
+}
+
+#[test]
+fn pane_float_without_a_workspace_creates_one() {
+    let (_env, mut app) = app("pane-float-no-workspace");
+    app.workspaces.clear();
+    app.panes.clear();
+
+    let out = app.dispatch("pane.float", &json!({})).unwrap();
+
+    assert_eq!(out["workspace"], "0");
+    assert_eq!(out["tab"], "1");
+    assert_eq!(app.workspaces.len(), 1);
+    assert!(app
+        .layout()
+        .is_floating(PaneId(out["pane"].as_str().unwrap().parse().unwrap())));
+}
+
+#[test]
+fn tiled_only_pane_methods_reject_a_floating_target() {
+    let (_env, mut app) = app("floating-tiled-only-reject");
+    app.dispatch("pane.split", &json!({})).unwrap();
+    let tiled = app.layout().focus;
+    let floating = add_floating(&mut app, 4, 2, 20, 6, true);
+    let before = pane_state(&app);
+
+    let calls = [
+        ("pane.split", json!({"pane": floating.0.to_string()})),
+        (
+            "pane.split",
+            json!({"pane": floating.0.to_string(), "direction": "auto"}),
+        ),
+        ("pane.transpose", json!({"pane": floating.0.to_string()})),
+        (
+            "pane.swap",
+            json!({"pane": floating.0.to_string(), "with": tiled.0}),
+        ),
+        (
+            "pane.swap",
+            json!({"pane": tiled.0, "with": floating.0.to_string()}),
+        ),
+        (
+            "pane.move",
+            json!({"pane": floating.0.to_string(), "new_tab": true}),
+        ),
+        (
+            "pane.resize",
+            json!({"pane": floating.0.to_string(), "direction": "left"}),
+        ),
+        ("pane.split", json!({})),
+        ("pane.transpose", json!({})),
+        ("pane.swap", json!({"with": tiled.0})),
+        ("pane.move", json!({"new_tab": true})),
+        ("pane.resize", json!({"direction": "left"})),
+    ];
+    for (method, params) in calls {
+        let error = app.dispatch(method, &params).unwrap_err();
+        assert_eq!(error.0, "invalid_request", "{method} {params}");
+        assert_eq!(error.1, "pane is floating", "{method} {params}");
+        assert_eq!(pane_state(&app), before, "{method} {params}");
+    }
+}
+
+#[test]
+fn pane_neighbor_and_edges_answer_for_the_tiled_focus() {
+    let (_env, mut app) = app("floating-neighbor-edges");
+    let left = app.layout().focus;
+    let right = PaneId(
+        app.dispatch("pane.split", &json!({})).unwrap()["pane"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    let floating = add_floating(&mut app, 4, 2, 20, 6, true);
+    assert_eq!(app.layout().tiled_focus, right);
+
+    let neighbor = app
+        .dispatch(
+            "pane.neighbor",
+            &json!({"pane": floating.0.to_string(), "direction": "left"}),
+        )
+        .unwrap();
+    assert_eq!(neighbor["neighbor"], left.0.to_string());
+
+    let floating_edges = app
+        .dispatch("pane.edges", &json!({"pane": floating.0.to_string()}))
+        .unwrap();
+    let tiled_edges = app
+        .dispatch("pane.edges", &json!({"pane": right.0.to_string()}))
+        .unwrap();
+    assert_eq!(floating_edges["pane"], floating.0.to_string());
+    assert_eq!(floating_edges["edges"], tiled_edges["edges"]);
+}
+
+#[test]
+fn pane_layout_for_a_floating_pane_returns_its_rect_and_the_tiled_tree() {
+    let (_env, mut app) = app("pane-layout-floating");
+    let tiled = app.layout().focus;
+    let floating = add_floating(&mut app, 10, 3, 50, 12, true);
+
+    let out = app
+        .dispatch("pane.layout", &json!({"pane": floating.0.to_string()}))
+        .unwrap();
+
+    assert_eq!(out["floating"], true);
+    assert_eq!(out["rect"], json!({"x":10,"y":3,"width":50,"height":12}));
+    let exported = app.dispatch("layout.export", &json!({})).unwrap();
+    assert_eq!(out["tree"], exported["tree"]);
+
+    let tiled_out = app
+        .dispatch("pane.layout", &json!({"pane": tiled.0.to_string()}))
+        .unwrap();
+    assert!(tiled_out.get("floating").is_none());
+}
+
+#[test]
+fn layout_apply_keeps_floating_panes_and_rejects_them_in_the_tree() {
+    let (_env, mut app) = app("layout-apply-floating");
+    app.dispatch("pane.split", &json!({})).unwrap();
+    let floating = add_floating(&mut app, 10, 3, 50, 12, true);
+    let exported = app.dispatch("layout.export", &json!({})).unwrap();
+    let rects = app.layout().floating_rects();
+
+    // No focus defaults to the tab's last focused tiled pane and leaves the
+    // floating pane untouched.
+    app.dispatch("layout.apply", &json!({"tree": exported["tree"].clone()}))
+        .unwrap();
+    assert_eq!(app.layout().focus, floating);
+    assert_eq!(app.layout().floating_rects(), rects);
+    assert_eq!(app.layout().leaves().len(), 2);
+
+    let tiled = app.layout().tiled_focus;
+    let after_apply = pane_state(&app);
+    let tree_with_floating = json!({"Split":{"axis":0,"ratio":0.5,"a":floating.0,"b":tiled.0}});
+    let error = app
+        .dispatch("layout.apply", &json!({"tree": tree_with_floating}))
+        .unwrap_err();
+    assert_eq!(error.0, "invalid_request");
+    assert_eq!(pane_state(&app), after_apply);
+
+    let error = app
+        .dispatch(
+            "layout.apply",
+            &json!({"tree": exported["tree"].clone(), "focus": floating.0.to_string()}),
+        )
+        .unwrap_err();
+    assert_eq!(error.0, "invalid_request");
+    assert_eq!(pane_state(&app), after_apply);
+}
+
+#[test]
+fn pane_list_marks_floating_panes_with_rect_and_z() {
+    let (_env, mut app) = app("pane-list-floating-fields");
+    let left = app.layout().focus;
+    let right = PaneId(
+        app.dispatch("pane.split", &json!({})).unwrap()["pane"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    let bottom = add_floating(&mut app, 1, 1, 10, 4, false);
+    let top = add_floating(&mut app, 2, 2, 10, 4, true);
+
+    let listed = app
+        .dispatch("pane.list", &json!({"all_tabs": false}))
+        .unwrap();
+    let rows = listed["panes"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    let row = |id: PaneId| {
+        rows.iter()
+            .find(|row| {
+                row["pane"]
+                    .as_str()
+                    .and_then(|pane| pane.parse::<u32>().ok())
+                    == Some(id.0)
+            })
+            .expect("pane is listed")
+    };
+    for tiled in [left, right] {
+        assert_eq!(row(tiled)["floating"], false);
+        assert!(row(tiled).get("rect").is_none());
+        assert!(row(tiled).get("z").is_none());
+    }
+    assert_eq!(row(top)["floating"], true);
+    assert_eq!(row(top)["z"], 0);
+    assert_eq!(row(top)["rect"], json!({"x":2,"y":2,"width":10,"height":4}));
+    assert_eq!(row(bottom)["floating"], true);
+    assert_eq!(row(bottom)["z"], 1);
+    assert_eq!(
+        row(bottom)["rect"],
+        json!({"x":1,"y":1,"width":10,"height":4})
+    );
+
+    let get = app
+        .dispatch("pane.get", &json!({"pane": top.0.to_string()}))
+        .unwrap();
+    assert_eq!(get["floating"], true);
+    assert_eq!(get["rect"], row(top)["rect"]);
+    assert_eq!(get["z"], 0);
+
+    let current = app.dispatch("pane.current", &json!({})).unwrap();
+    assert_eq!(current["pane"], top.0.to_string());
+    assert_eq!(current["floating"], true);
+    assert_eq!(current["z"], 0);
+
+    let status = app
+        .dispatch("pane.status", &json!({"pane": bottom.0.to_string()}))
+        .unwrap();
+    assert_eq!(status["floating"], true);
+    assert_eq!(status["z"], 1);
+    assert_eq!(status["rect"], row(bottom)["rect"]);
+}

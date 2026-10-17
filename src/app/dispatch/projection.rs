@@ -113,6 +113,40 @@ pub(in crate::app::dispatch) fn module_json(m: &crate::module::InstalledModule) 
 /// Privacy-preserving executable inventory from cached process command lines.
 /// Keep only argv[0], plus an interpreter's first non-flag script name, and
 /// de-duplicate in scan order. Full argv commonly contains prompts or secrets.
+/// Placement fields for a pane projection. Every pane reports `floating`; a
+/// floating pane also reports its stored outer rect (pane-area cells) and its
+/// stacking position, where 0 is the top.
+pub(in crate::app::dispatch) fn pane_placement(
+    layout: &crate::layout::TileLayout,
+    pane: PaneId,
+) -> Value {
+    if !layout.is_floating(pane) {
+        return json!({"floating": false});
+    }
+    let rects = layout.floating_rects();
+    let Some(z) = rects.iter().position(|(id, _)| *id == pane) else {
+        return json!({"floating": false});
+    };
+    let rect = rects[z].1;
+    json!({
+        "floating": true,
+        "rect": {"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height},
+        "z": z,
+    })
+}
+
+/// Merge placement fields into an existing pane projection object.
+pub(in crate::app::dispatch) fn with_pane_placement(mut row: Value, placement: Value) -> Value {
+    if let (Some(object), Some(placement)) = (row.as_object_mut(), placement.as_object()) {
+        object.extend(
+            placement
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
+    row
+}
+
 pub(in crate::app::dispatch) fn process_executables(commands: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     for command in commands.iter().take(128) {

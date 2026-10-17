@@ -51,10 +51,15 @@ impl App {
             let pane = self.resolve_pane_or_focus(p)?;
             let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
             let area = crate::api::topology::logical_area();
-            let rect = self.workspaces[workspace].tabs[tab]
-                .layout
-                .pane_rect(area, pane)
-                .ok_or_else(not_found)?;
+            let layout = &self.workspaces[workspace].tabs[tab].layout;
+            // A floating pane has no tree rect; its edges answer for the last
+            // focused tiled pane, as `pane.neighbor` does.
+            let query = if layout.is_floating(pane) {
+                layout.tiled_focus
+            } else {
+                pane
+            };
+            let rect = layout.pane_rect(area, query).ok_or_else(not_found)?;
             Ok(
                 json!({"type":"pane_edges","pane":pane.0.to_string(),"edges":{
                     "left":rect.x == area.x, "right":rect.right() == area.right(),
@@ -92,6 +97,7 @@ impl App {
                         continue;
                     }
                     for id in tab.layout.all_panes() {
+                        let placement = pane_placement(&tab.layout, id);
                         let (agent, status) = self
                             .status
                             .get(&id)
@@ -107,7 +113,7 @@ impl App {
                             .module_panes
                             .get(&id)
                             .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
-                        panes.push(json!({
+                        panes.push(with_pane_placement(json!({
                         "pane": id.0.to_string(), "agent": agent, "status": status,
                         "workspace": workspace_index.to_string(), "workspace_id": workspace.id,
                         "tab": (tab_index + 1).to_string(), "tab_id": tab.id,
@@ -130,7 +136,7 @@ impl App {
                         "history_allocation_count": history.and_then(|m| m.allocation_count),
                         "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                         "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-                    }));
+                    }), placement));
                     }
                 }
             }
@@ -185,6 +191,12 @@ impl App {
                 None | Some(Value::Null) => self.layout().focus,
                 Some(_) => self.resolve_pane(p)?.ok_or_else(not_found)?,
             };
+            if self.is_floating_pane(base) {
+                return Err((
+                    "invalid_request".to_string(),
+                    "pane is floating".to_string(),
+                ));
+            }
             let axis = match p.get("direction") {
                 None | Some(Value::Null) => self.auto_split_axis_for(base),
                 Some(Value::String(dir)) => match dir.as_str() {
@@ -217,6 +229,101 @@ impl App {
                 "tab": (tab + 1).to_string(),
             }))
         }
+    }
+
+    /// Create a floating pane in the target pane's tab, or in the active tab
+    /// when no target is given. Every parameter is validated before the app
+    /// mutates state or spawns a PTY.
+    pub(super) fn api_pane_float(&mut self, method: &str, p: &Value) -> DispatchResult {
+        let _ = method;
+        reject_api_fields(
+            p,
+            &[
+                "pane", "width", "height", "x", "y", "title", "focus", "command",
+            ],
+        )?;
+        let target = match p.get("pane") {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(self.resolve_pane(p)?.ok_or_else(not_found)?),
+        };
+        let width = optional_u16_param(p, "width")?;
+        let height = optional_u16_param(p, "height")?;
+        for (key, value) in [("width", width), ("height", height)] {
+            if value.is_some_and(|value| value < crate::layout::MIN_FLOATING) {
+                return Err((
+                    "invalid_request".to_string(),
+                    format!("{key} must be at least {}", crate::layout::MIN_FLOATING),
+                ));
+            }
+        }
+        let x = optional_u16_param(p, "x")?;
+        let y = optional_u16_param(p, "y")?;
+        let title = match p.get("title") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(title)) => Some(title.clone()),
+            Some(_) => {
+                return Err((
+                    "invalid_request".to_string(),
+                    "title must be a string".to_string(),
+                ))
+            }
+        };
+        let focus = match p.get("focus") {
+            None | Some(Value::Null) => true,
+            Some(Value::Bool(focus)) => *focus,
+            Some(_) => {
+                return Err((
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string(),
+                ))
+            }
+        };
+        let command = match p.get("command") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(items)) => {
+                let mut argv = Vec::with_capacity(items.len());
+                for item in items {
+                    let argument = item.as_str().filter(|argument| !argument.is_empty());
+                    argv.push(argument.ok_or_else(|| {
+                        (
+                            "invalid_request".to_string(),
+                            "command must be an array of non-empty strings".to_string(),
+                        )
+                    })?);
+                }
+                if argv.is_empty() {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "command must not be empty".to_string(),
+                    ));
+                }
+                Some(argv.into_iter().map(str::to_string).collect())
+            }
+            Some(_) => {
+                return Err((
+                    "invalid_request".to_string(),
+                    "command must be an array of strings".to_string(),
+                ))
+            }
+        };
+        let result = self
+            .float_pane(FloatingPaneRequest {
+                target,
+                width,
+                height,
+                x,
+                y,
+                title,
+                focus,
+                command,
+            })
+            .map_err(floating_pane_error)?;
+        Ok(json!({
+            "type":"pane",
+            "pane": result.pane.0.to_string(),
+            "workspace": result.workspace.to_string(),
+            "tab": (result.tab + 1).to_string(),
+        }))
     }
 
     pub(super) fn api_pane_move(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -338,26 +445,35 @@ impl App {
                 })
                 .unwrap_or_else(|| (String::new(), "unknown".to_string(), "none", "none"));
             let history = self.panes.get(&id).map(|p| p.history_metrics());
-            Ok(json!({
-                "type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status,
-                "authority":authority, "state_source":state_source,
-                "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
-                "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
-                "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
-                "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
-                "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
-                "history_cache_bytes": history.and_then(|m| m.cache_bytes),
-                "history_compacted_rows": history.and_then(|m| m.compacted_rows),
-                "history_allocated_cells": history.and_then(|m| m.allocated_cells),
-                "history_packed_blocks": history.and_then(|m| m.packed_blocks),
-                "history_packed_bytes": history.and_then(|m| m.packed_bytes),
-                "history_packed_rows": history.and_then(|m| m.packed_rows),
-                "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
-                "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
-                "history_allocation_count": history.and_then(|m| m.allocation_count),
-                "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
-                "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-            }))
+            let placement = self
+                .pane_location(id)
+                .map(|(workspace, tab)| {
+                    pane_placement(&self.workspaces[workspace].tabs[tab].layout, id)
+                })
+                .unwrap_or_else(|| json!({"floating": false}));
+            Ok(with_pane_placement(
+                json!({
+                    "type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status,
+                    "authority":authority, "state_source":state_source,
+                    "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
+                    "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
+                    "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
+                    "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                    "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
+                    "history_cache_bytes": history.and_then(|m| m.cache_bytes),
+                    "history_compacted_rows": history.and_then(|m| m.compacted_rows),
+                    "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                    "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                    "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                    "history_packed_rows": history.and_then(|m| m.packed_rows),
+                    "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                    "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                    "history_allocation_count": history.and_then(|m| m.allocation_count),
+                    "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                    "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
+                }),
+                placement,
+            ))
         }
     }
 
@@ -1265,7 +1381,7 @@ impl App {
                 ));
             }
             let focus = match p.get("focus") {
-                None => tab_ref.layout.focus,
+                None => tab_ref.layout.tiled_focus,
                 Some(value) => PaneId(parse_u32_value(value, "focus")?),
             };
             tab_ref
@@ -1379,6 +1495,12 @@ impl App {
         {
             reject_api_fields(p, &["pane", "direction", "cells"])?;
             let pane = self.resolve_pane_or_focus(p)?;
+            if self.is_floating_pane(pane) {
+                return Err((
+                    "invalid_request".to_string(),
+                    "pane is floating".to_string(),
+                ));
+            }
             let direction = crate::api::topology::direction(p)?;
             let cells = p.get("cells").and_then(Value::as_i64).unwrap_or(1);
             if !(1..=1000).contains(&cells) {
@@ -1479,6 +1601,12 @@ impl App {
                 .ok_or_else(not_found)?,
             Some(value) => PaneId(parse_u32_value(value, "pane")?),
         };
+        if self.is_floating_pane(pane) {
+            return Err((
+                "invalid_request".to_string(),
+                "pane is floating".to_string(),
+            ));
+        }
         let changed = self.transpose_pane(pane).ok_or_else(not_found)?;
         Ok(json!({"type":"pane_transpose","pane":pane.0.to_string(),"changed":changed}))
     }
@@ -1497,6 +1625,12 @@ impl App {
                 })?,
                 "with",
             )?);
+            if self.is_floating_pane(first) || self.is_floating_pane(second) {
+                return Err((
+                    "invalid_request".to_string(),
+                    "pane is floating".to_string(),
+                ));
+            }
             let first_location = self.pane_location(first).ok_or_else(not_found)?;
             let second_location = self.pane_location(second).ok_or_else(not_found)?;
             if first_location != second_location {
@@ -1746,23 +1880,27 @@ impl App {
         let terminal = self.panes.get(&pane);
         let status = self.status.get(&pane);
         let history = terminal.map(|pane| pane.history_metrics());
-        Ok(json!({
-            "type":"pane", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
-            "workspace_id":self.workspaces[workspace].id,
-            "tab":(tab+1).to_string(), "tab_id":self.workspaces[workspace].tabs[tab].id,
-            "terminal_id":terminal.and_then(|pane| pane.terminal_runtime()).map(|runtime| runtime.terminal_id),
-            "focused":workspace == self.active_ws
-                && tab == self.workspaces[workspace].active_tab
-                && self.workspaces[workspace].tabs[tab].layout.focus == pane,
-            "name":self.agent_name_for(pane),
-            "cwd":terminal.map(|pane| pane.cwd.display().to_string()),
-            "command":terminal.map(|pane| pane.command.as_str()),
-            "agent":status.map(|status| status.agent.as_str()),
-            "status":status.map(|status| state_str(status.state)).unwrap_or("unknown"),
-            "history_budget_bytes":history.map(|metrics| metrics.budget_bytes),
-            "history_bytes":history.map(|metrics| metrics.retained_bytes),
-            "module":self.module_panes.get(&pane).map(|module| json!({"id":module.module_id,"entrypoint":module.entrypoint})),
-        }))
+        let placement = pane_placement(&self.workspaces[workspace].tabs[tab].layout, pane);
+        Ok(with_pane_placement(
+            json!({
+                "type":"pane", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
+                "workspace_id":self.workspaces[workspace].id,
+                "tab":(tab+1).to_string(), "tab_id":self.workspaces[workspace].tabs[tab].id,
+                "terminal_id":terminal.and_then(|pane| pane.terminal_runtime()).map(|runtime| runtime.terminal_id),
+                "focused":workspace == self.active_ws
+                    && tab == self.workspaces[workspace].active_tab
+                    && self.workspaces[workspace].tabs[tab].layout.focus == pane,
+                "name":self.agent_name_for(pane),
+                "cwd":terminal.map(|pane| pane.cwd.display().to_string()),
+                "command":terminal.map(|pane| pane.command.as_str()),
+                "agent":status.map(|status| status.agent.as_str()),
+                "status":status.map(|status| state_str(status.state)).unwrap_or("unknown"),
+                "history_budget_bytes":history.map(|metrics| metrics.budget_bytes),
+                "history_bytes":history.map(|metrics| metrics.retained_bytes),
+                "module":self.module_panes.get(&pane).map(|module| json!({"id":module.module_id,"entrypoint":module.entrypoint})),
+            }),
+            placement,
+        ))
     }
 
     pub(in crate::app::dispatch) fn socket_pane_layout(
@@ -1772,13 +1910,29 @@ impl App {
         let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
         let area = crate::api::topology::logical_area();
         let layout = &self.workspaces[workspace].tabs[tab].layout;
-        let rect = layout.pane_rect(area, pane).ok_or_else(not_found)?;
-        Ok(json!({
+        // A floating pane has a stored rect instead of tree geometry, and the
+        // tree always stays tiled-only.
+        let floating = layout.is_floating(pane);
+        let rect = if floating {
+            layout
+                .floating_rects()
+                .into_iter()
+                .find(|(id, _)| *id == pane)
+                .map(|(_, rect)| rect)
+                .ok_or_else(not_found)?
+        } else {
+            layout.pane_rect(area, pane).ok_or_else(not_found)?
+        };
+        let mut value = json!({
             "type":"pane_layout", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
             "tab":(tab+1).to_string(), "logical_size":{"width":area.width,"height":area.height},
             "rect":{"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height},
             "tree":layout.to_tree(),
-        }))
+        });
+        if floating {
+            value["floating"] = json!(true);
+        }
+        Ok(value)
     }
 
     pub(in crate::app::dispatch) fn reorder_workspace_block(

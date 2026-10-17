@@ -237,7 +237,7 @@ Floating panes SHALL be server state. Every attached client SHALL see the same f
 - **THEN** that client draws the pane clamped to its area, and the stored geometry and PTY size do not change
 
 ### Requirement: Floating panes are visible to agents
-Every agent-facing surface SHALL treat a floating pane as a full pane. The live runtime snapshot (`session.snapshot`), the agent list, agent kind and name lookup, the terminal backend inventory, Mission Control usage and rows, orchestration agent choices and pane reuse, the agents dock, and pane events SHALL include a floating pane in the same way as a tiled pane, and SHALL mark it as floating with its rectangle and stacking position where the surface reports panes. A surface that picks a pane to split or to place a new pane next to SHALL use a tiled pane. Luvus Web MAY omit floating panes from its views.
+Every agent-facing surface SHALL treat a floating pane as a full pane and SHALL mark it as floating where it reports panes. A surface that picks a pane to split or to place a new pane next to SHALL use a tiled pane. Luvus Web MAY omit floating panes.
 
 #### Scenario: Snapshot with a floating agent
 - **WHEN** a tab has one tiled pane and one floating pane that runs an agent, and a client requests `session.snapshot`

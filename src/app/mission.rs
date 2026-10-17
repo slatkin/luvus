@@ -419,7 +419,7 @@ impl App {
             if !all && wi != workspace_index {
                 continue;
             }
-            for id in workspace.tabs.iter().flat_map(|tab| tab.layout.leaves()) {
+            for id in workspace.tabs.iter().flat_map(|tab| tab.layout.all_panes()) {
                 let Some(session) = self
                     .status
                     .get(&id)
@@ -479,8 +479,10 @@ impl App {
                 continue;
             }
             for (ti, tab) in workspace.tabs.iter().enumerate() {
-                let leaves = tab.layout.leaves();
-                for (pi, id) in leaves.iter().copied().enumerate() {
+                // Floating panes run agents too, so Mission Control lists them
+                // after the tab's tiled panes.
+                let panes = tab.layout.all_panes();
+                for (pi, id) in panes.iter().copied().enumerate() {
                     let Some(s) = self.status.get(&id) else {
                         continue;
                     };
@@ -506,8 +508,8 @@ impl App {
                         } else {
                             tab_name
                         };
-                        if leaves.len() > 1 {
-                            location.push_str(&format!(" p{}/{}", pi + 1, leaves.len()));
+                        if panes.len() > 1 {
+                            location.push_str(&format!(" p{}/{}", pi + 1, panes.len()));
                         }
                         if let Some(task) =
                             self.orch.tasks.iter().find(|t| t.assignee == Some(id.0))

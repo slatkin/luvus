@@ -20112,6 +20112,73 @@ fi
     }
 
     #[test]
+    fn mission_control_includes_a_floating_agent_and_reads_its_usage() {
+        use crate::mission::{AgentUsage, MissionRow, UsageKey};
+        let _env = crate::persist::test_env("mission-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, Some(shell_command(&app)), true))
+            .expect("floating pane spawns")
+            .pane;
+        let cwd = app.panes[&floating].cwd.clone();
+        {
+            let status = app.status.get_mut(&floating).unwrap();
+            status.agent = "claude".into();
+            status.agent_session = Some(AgentSession {
+                agent: "claude".into(),
+                session_id: "float-1".into(),
+            });
+        }
+        let key = UsageKey::new("claude", "float-1");
+        app.agent_usage.insert(
+            key.clone(),
+            AgentUsage {
+                model: "claude-opus-4-8".into(),
+                tokens_in: 4000,
+                tokens_out: 1200,
+                cache: 300,
+                context: Some(0.9),
+                cost: Some(0.12),
+            },
+        );
+
+        let targets = app.mission_usage_targets_for(crate::mission::MissionScope::Workspace, 0);
+        assert_eq!(
+            targets.get(&key),
+            Some(&cwd),
+            "the floating agent is a usage target"
+        );
+
+        app.open_mission_control(0);
+        app.mission_rows = app.build_mission_rows();
+        let rows = app.mission_rows.clone();
+        assert_eq!(rows.len(), 1, "the floating agent is the only live row");
+        assert_eq!(rows[0].row, MissionRow::Live(floating));
+        assert_eq!(
+            rows[0].usage.as_ref().and_then(|usage| usage.cost),
+            Some(0.12)
+        );
+        assert!(
+            rows[0].location.ends_with("p2/2"),
+            "the floating pane is the tab's second pane: {}",
+            rows[0].location
+        );
+
+        app.handle_mission_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.active_is_mission(), "jumped off the dashboard");
+        assert!(
+            app.layout().is_floating(floating),
+            "the floating pane keeps its placement"
+        );
+        assert_eq!(
+            app.layout().focus,
+            floating,
+            "the row focuses the floating pane"
+        );
+    }
+
+    #[test]
     fn mission_usage_refresh_is_demand_driven() {
         use ratatui::crossterm::event::{
             KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

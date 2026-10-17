@@ -302,10 +302,16 @@ pane and preserves focus, zoom, ratios, and live terminals. A single pane
 returns `changed:false`. Resolve the target ID first. After a lost response,
 inspect its layout before retrying: transposing twice restores the original.
 
+Floating panes are overlays above the tiled tree. Use `pane float` when a pane
+should cover part of the tab without changing its tiled layout; split,
+transpose, swap, move, and resize reject a floating pane, while focus, close,
+run, send, and read still work.
+
 Examples of explicit mutations, only when requested:
 
 ```sh
 luvus pane split --down
+luvus pane float --width 60 --height 12
 luvus pane transpose <pane-id>
 luvus pane run <pane-id> <command> [args...]
 luvus agent start reviewer --kind codex --anchor <pane-id> --timeout 60

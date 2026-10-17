@@ -249,10 +249,11 @@ luvus agent start reviewer --kind codex --anchor <pane-id> --timeout 30
 
 Try the anchored start directly. Only when it returns a syntax or usage error
 showing that `--anchor` is unsupported, use the compatible two-command path and
-pass the new pane id returned by `pane split`. Do not run a help preflight:
+pass the new pane id returned by `pane split` or `pane float`. Do not run a help preflight:
 
 ```sh
 luvus pane split <anchor-pane-id> --no-focus
+# A floating overlay instead: luvus pane float <anchor-pane-id> --no-focus
 luvus agent start reviewer --kind codex --pane <new-pane-id> --timeout 30
 ```
 
@@ -384,10 +385,15 @@ restore or spawn failure, not proof that the server is offline. Use
 From a managed pane, use `LUVUS_PANE_ID` as the caller or split anchor. From an
 external terminal, select an explicit pane returned by live state.
 
-To run an ordinary command beside an explicit pane without stealing focus:
+To run an ordinary command beside an explicit pane without stealing focus,
+choose `pane split` for a tiled helper or `pane float` for an overlay above the
+tiled tree. Floating panes do not change the tiled layout; split, transpose,
+swap, move, and resize reject a floating pane, while focus, close, run, send,
+and read still work.
 
 ```sh
 luvus pane split <anchor-pane-id> --no-focus
+luvus pane float <anchor-pane-id> --no-focus
 luvus pane run <new-pane-id> "cargo test"
 luvus wait output <new-pane-id> --match "test result" --timeout 300
 luvus pane read <new-pane-id> --lines 120
@@ -403,8 +409,9 @@ luvus agent fork <target> [--name <alias>] [--no-focus]
 
 Native forks currently support Claude, Grok, Codex, Kilo Code, Pi, and OMP. Report
 `unsupported_agent`, `session_unknown`, or `spawn_failed` exactly when returned.
-Do not approximate a failed fork with `pane split`, `agent start`, or `resume`,
-because those paths do not guarantee an independent copy of the conversation.
+Do not approximate a failed fork with `pane split`, `pane float`, `agent start`,
+or `resume`, because those paths do not guarantee an independent copy of the
+conversation.
 
 Transpose a split only after resolving its pane ID:
 

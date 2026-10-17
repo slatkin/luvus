@@ -342,6 +342,27 @@ impl App {
         Ok(target.id)
     }
 
+    /// Why a commander fork request failed, phrased for the receipt line.
+    fn agent_fork_failure(error: AgentForkError, id: crate::ids::PaneId) -> String {
+        match error {
+            AgentForkError::PaneNotFound | AgentForkError::SourceNotPaneTab => {
+                format!("p{} is no longer a live pane", id.0)
+            }
+            AgentForkError::FloatingPane => {
+                format!("p{} is a floating pane and cannot be forked", id.0)
+            }
+            AgentForkError::UnsupportedAgent => {
+                format!("p{} does not support session forking", id.0)
+            }
+            AgentForkError::SessionUnknown => {
+                format!("p{} has no known native session to fork", id.0)
+            }
+            AgentForkError::SpawnFailed => {
+                format!("Could not start the fork beside p{}", id.0)
+            }
+        }
+    }
+
     pub(crate) fn commander_dispatch_slash_action(
         &mut self,
         action: SlashAction,
@@ -432,23 +453,7 @@ impl App {
                 let id = self.commander_check_action_pane(&target)?;
                 let result = self
                     .fork_agent_pane(id, true)
-                    .map_err(|error| match error {
-                        AgentForkError::PaneNotFound | AgentForkError::SourceNotPaneTab => {
-                            format!("p{} is no longer a live pane", id.0)
-                        }
-                        AgentForkError::FloatingPane => {
-                            format!("p{} is a floating pane and cannot be forked", id.0)
-                        }
-                        AgentForkError::UnsupportedAgent => {
-                            format!("p{} does not support session forking", id.0)
-                        }
-                        AgentForkError::SessionUnknown => {
-                            format!("p{} has no known native session to fork", id.0)
-                        }
-                        AgentForkError::SpawnFailed => {
-                            format!("Could not start the fork beside p{}", id.0)
-                        }
-                    })?;
+                    .map_err(|error| Self::agent_fork_failure(error, id))?;
                 let mention = self.commander_pane_mention(result.pane);
                 let commander = self.commander.as_mut().unwrap();
                 commander.clear_all();

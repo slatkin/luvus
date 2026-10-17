@@ -776,38 +776,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // compact still draws the tab's floating panes, because they are shared
     // server state that every attached client shows.
     let single_pane = app.zoomed || app.compact;
-    let pane_bounds = Rect::new(0, 0, pane_area.width, pane_area.height);
-    // Only the interactive client may clamp the *stored* floating rects. A
-    // passive projection draws a clamped copy, so its smaller viewport never
-    // moves shared geometry or resizes another client's PTYs.
-    if resize_panes && previous_pane_area != pane_area {
-        app.clamp_stored_floating_rects(pane_bounds);
-    }
-    // Floating panes draw above the tiled layer, bottom to top. Rects are stored
-    // relative to the pane area, so offset them onto this client's screen after
-    // clamping the copy for this client's area.
-    let mut floating: Vec<(PaneId, Rect)> = if app.zoomed {
-        Vec::new()
-    } else {
-        // `floating_rects` is top first; draw order is bottom to top.
-        let mut rects = app.layout().floating_rects();
-        rects.reverse();
-        rects
-    };
-    // Compact presentation fills the screen with the focused pane, so a focused
-    // floating pane is already drawn there and must not draw twice.
-    if app.compact {
-        floating.retain(|(id, _)| *id != focus);
-    }
-    for (_, rect) in &mut floating {
-        let clamped = crate::layout::clamp_floating_rect(*rect, pane_bounds);
-        *rect = Rect::new(
-            pane_area.x + clamped.x,
-            pane_area.y + clamped.y,
-            clamped.width,
-            clamped.height,
-        );
-    }
+    let floating = floating_frame_rects(app, resize_panes, previous_pane_area, pane_area, focus);
     let tiled: Vec<(PaneId, Rect)> = if single_pane {
         vec![(focus, pane_area)]
     } else {
@@ -825,34 +794,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // control remains available.
     let lone_header = !bordered && !app.compact && (app.config.layout.show_titles || app.zoomed);
     if resize_panes {
-        let tiled_content = tiled
-            .iter()
-            .map(|(id, rect)| (*id, pane_content(*rect, bordered, app.compact, lone_header)));
-        let floating_content = floating
-            .iter()
-            .map(|(id, rect)| (*id, floating_pane_content(*rect)));
-        for (id, content) in tiled_content.chain(floating_content) {
-            let Some(content) = content else {
-                continue;
-            };
-            let resized = app
-                .panes
-                .get_mut(&id)
-                .map(|p| p.resize(content.width, content.height))
-                .unwrap_or(false);
-            // A real resize (e.g. switching to a tab whose panes have a different
-            // geometry) repaints the agent; note it so detection freezes briefly
-            // and a reflowed spinner can't flip the pane to "working" (docs/07).
-            if resized {
-                if let Some(search) = app.pane_search.as_mut().filter(|search| search.pane == id) {
-                    search.invalidate_matches();
-                }
-                if let Some(s) = app.status.get_mut(&id) {
-                    s.last_resize = Some(std::time::Instant::now());
-                    s.force_detect = true;
-                }
-            }
-        }
+        resize_panes_to_content(app, &tiled, &floating, bordered, lone_header);
     }
 
     // Clear every dock/sidebar hit-geometry up front, then let each drawn dock
@@ -908,20 +850,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // The focused pane's ✕ close and ⤢ zoom buttons, for mouse hit-testing. A
     // floating pane always carries a border, so it owns its own buttons even
     // when the tiled layer below holds a single borderless pane.
-    let focused_chrome: Option<Rect> = if single_pane {
-        None
-    } else if let Some((_, rect)) = floating.iter().find(|(id, _)| *id == focus) {
-        Some(*rect)
-    } else {
-        bordered
-            .then(|| {
-                tiled
-                    .iter()
-                    .find(|(id, _)| *id == focus)
-                    .map(|(_, rect)| *rect)
-            })
-            .flatten()
-    };
+    let focused_chrome = focused_pane_chrome(single_pane, focus, &floating, &tiled, bordered);
     app.pane_close_rect = focused_chrome.and_then(|rect| pane_close_rect(rect, true));
     // Zoom button: the split-title ⤢ when bordered, else the lone-header ⤡ that
     // restores a *zoomed* single pane (so a phone can un-zoom).
@@ -1418,6 +1347,112 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.new_ws_rect = new_ws_rect;
+}
+
+/// Floating panes to draw this frame, bottom to top, in client-local rects.
+///
+/// Only the interactive client may clamp the *stored* floating rects. A passive
+/// projection draws a clamped copy, so its smaller viewport never moves shared
+/// geometry or resizes another client's PTYs. Rects are stored relative to the
+/// pane area, so they are offset onto this client's screen after clamping.
+fn floating_frame_rects(
+    app: &mut App,
+    resize_panes: bool,
+    previous_pane_area: Rect,
+    pane_area: Rect,
+    focus: PaneId,
+) -> Vec<(PaneId, Rect)> {
+    let pane_bounds = Rect::new(0, 0, pane_area.width, pane_area.height);
+    if resize_panes && previous_pane_area != pane_area {
+        app.clamp_stored_floating_rects(pane_bounds);
+    }
+    let mut floating: Vec<(PaneId, Rect)> = if app.zoomed {
+        Vec::new()
+    } else {
+        // `floating_rects` is top first; draw order is bottom to top.
+        let mut rects = app.layout().floating_rects();
+        rects.reverse();
+        rects
+    };
+    // Compact presentation fills the screen with the focused pane, so a focused
+    // floating pane is already drawn there and must not draw twice.
+    if app.compact {
+        floating.retain(|(id, _)| *id != focus);
+    }
+    for (_, rect) in &mut floating {
+        let clamped = crate::layout::clamp_floating_rect(*rect, pane_bounds);
+        *rect = Rect::new(
+            pane_area.x + clamped.x,
+            pane_area.y + clamped.y,
+            clamped.width,
+            clamped.height,
+        );
+    }
+    floating
+}
+
+/// The focused pane's own rect when it carries ✕ / ⤢ chrome. A floating pane
+/// always carries a border, so it owns its buttons even when the tiled layer
+/// below holds a single borderless pane.
+fn focused_pane_chrome(
+    single_pane: bool,
+    focus: PaneId,
+    floating: &[(PaneId, Rect)],
+    tiled: &[(PaneId, Rect)],
+    bordered: bool,
+) -> Option<Rect> {
+    if single_pane {
+        return None;
+    }
+    if let Some((_, rect)) = floating.iter().find(|(id, _)| *id == focus) {
+        return Some(*rect);
+    }
+    if !bordered {
+        return None;
+    }
+    tiled
+        .iter()
+        .find(|(id, _)| *id == focus)
+        .map(|(_, rect)| *rect)
+}
+
+/// Size every pane's PTY to the content rect this frame will draw.
+fn resize_panes_to_content(
+    app: &mut App,
+    tiled: &[(PaneId, Rect)],
+    floating: &[(PaneId, Rect)],
+    bordered: bool,
+    lone_header: bool,
+) {
+    let compact = app.compact;
+    let tiled_content = tiled
+        .iter()
+        .map(|(id, rect)| (*id, pane_content(*rect, bordered, compact, lone_header)));
+    let floating_content = floating
+        .iter()
+        .map(|(id, rect)| (*id, floating_pane_content(*rect)));
+    for (id, content) in tiled_content.chain(floating_content) {
+        let Some(content) = content else {
+            continue;
+        };
+        let resized = app
+            .panes
+            .get_mut(&id)
+            .map(|p| p.resize(content.width, content.height))
+            .unwrap_or(false);
+        // A real resize (e.g. switching to a tab whose panes have a different
+        // geometry) repaints the agent; note it so detection freezes briefly
+        // and a reflowed spinner can't flip the pane to "working" (docs/07).
+        if resized {
+            if let Some(search) = app.pane_search.as_mut().filter(|search| search.pane == id) {
+                search.invalidate_matches();
+            }
+            if let Some(s) = app.status.get_mut(&id) {
+                s.last_resize = Some(std::time::Instant::now());
+                s.force_detect = true;
+            }
+        }
+    }
 }
 
 fn draw_commander(

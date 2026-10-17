@@ -960,12 +960,11 @@ impl App {
         true
     }
 
-    /// Run a prefix command.
-    pub fn run_cmd(&mut self, cmd: Cmd) {
-        // Split, transpose and resize act on the tiled tree. A floating pane has
-        // no tree geometry, so these show a notice instead of acting on the last
-        // focused tile behind the user's back.
-        if matches!(
+    /// Split, transpose and resize act on the tiled tree. A floating pane has no
+    /// tree geometry, so these show a notice instead of acting on the last
+    /// focused tile behind the user's back.
+    fn floating_pane_blocks_tiled_command(&self, cmd: Cmd) -> bool {
+        matches!(
             cmd,
             Cmd::SplitRight
                 | Cmd::SplitDown
@@ -977,7 +976,11 @@ impl App {
             .get(self.active_ws)
             .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
             .is_some_and(|tab| tab.layout.is_floating(tab.layout.focus))
-        {
+    }
+
+    /// Run a prefix command.
+    pub fn run_cmd(&mut self, cmd: Cmd) {
+        if self.floating_pane_blocks_tiled_command(cmd) {
             self.show_toast(self.catalog.floating_tiled_only);
             return;
         }
@@ -994,16 +997,7 @@ impl App {
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
             Cmd::SplitAuto => self.split_auto(),
-            Cmd::TransposePane => {
-                if let Some(pane) = self
-                    .workspaces
-                    .get(self.active_ws)
-                    .and_then(|ws| ws.tabs.get(ws.active_tab))
-                    .map(|tab| tab.layout.focus)
-                {
-                    self.transpose_pane(pane);
-                }
-            }
+            Cmd::TransposePane => self.transpose_focused_pane(),
             // Fork the focused agent pane's session into a new pane (no-op if it
             // isn't a fork-capable agent).
             Cmd::ForkSession => {
@@ -1072,6 +1066,18 @@ impl App {
             Cmd::Switcher => self.toggle_switcher(),
             Cmd::GlobalSearch => self.toggle_search(),
             Cmd::Detach => self.detach_requested = true,
+        }
+    }
+
+    /// Transpose the focused tiled pane's nearest split without moving focus.
+    fn transpose_focused_pane(&mut self) {
+        if let Some(pane) = self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|ws| ws.tabs.get(ws.active_tab))
+            .map(|tab| tab.layout.focus)
+        {
+            self.transpose_pane(pane);
         }
     }
 

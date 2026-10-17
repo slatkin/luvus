@@ -3439,84 +3439,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("pane.split".into(), with_pane(obj))
         }
-        ("pane", "float") => {
-            let separator = rest.iter().position(|arg| arg == "--");
-            let (options, command) = match separator {
-                Some(index) => (&rest[..index], Some(&rest[index + 1..])),
-                None => (rest, None),
-            };
-            let mut obj = serde_json::Map::new();
-            let mut pane_id: Option<String> = None;
-            let mut index = 0;
-            while index < options.len() {
-                match options[index].as_str() {
-                    "--no-focus" => {
-                        if obj.contains_key("focus") {
-                            return Err(anyhow!("--no-focus may be passed only once"));
-                        }
-                        obj.insert("focus".to_string(), json!(false));
-                        index += 1;
-                    }
-                    "--width" | "--height" | "--x" | "--y" | "--title" => {
-                        let flag = options[index].clone();
-                        let key = flag.trim_start_matches("--").to_string();
-                        let raw = options
-                            .get(index + 1)
-                            .ok_or_else(|| anyhow!("{flag} requires a value"))?;
-                        if obj.contains_key(&key) {
-                            return Err(anyhow!("{flag} may be passed only once"));
-                        }
-                        let value = if key == "title" {
-                            if raw.is_empty() || raw.starts_with("--") {
-                                return Err(anyhow!("{flag} requires a value"));
-                            }
-                            json!(raw)
-                        } else {
-                            let number = raw.parse::<u16>().map_err(|_| {
-                                if matches!(key.as_str(), "width" | "height") {
-                                    anyhow!("{flag} must be a whole number from 3 to 65535")
-                                } else {
-                                    anyhow!("{flag} must be a whole number from 0 to 65535")
-                                }
-                            })?;
-                            if matches!(key.as_str(), "width" | "height")
-                                && number < crate::layout::MIN_FLOATING
-                            {
-                                return Err(anyhow!(
-                                    "{flag} must be a whole number from 3 to 65535"
-                                ));
-                            }
-                            json!(number)
-                        };
-                        obj.insert(key, value);
-                        index += 2;
-                    }
-                    flag if flag.starts_with("--") => {
-                        return Err(anyhow!("{flag} is an unknown pane float option"));
-                    }
-                    raw => {
-                        if pane_id.is_some() || raw.parse::<u32>().is_err() {
-                            return Err(anyhow!("pane id must be one numeric value"));
-                        }
-                        pane_id = Some(raw.to_string());
-                        index += 1;
-                    }
-                }
-            }
-            if let Some(command) = command {
-                if command.is_empty() {
-                    return Err(anyhow!("-- requires at least one command argument"));
-                }
-                if command.iter().any(String::is_empty) {
-                    return Err(anyhow!("command arguments must not be empty"));
-                }
-                obj.insert("command".to_string(), json!(command));
-            }
-            if let Some(pane) = pane_id.or_else(|| std::env::var("LUVUS_PANE_ID").ok()) {
-                obj.insert("pane".to_string(), json!(pane));
-            }
-            ("pane.float".into(), Value::Object(obj))
-        }
+        ("pane", "float") => ("pane.float".into(), parse_pane_float(rest)?),
         ("pane", "transpose") => {
             if rest.len() > 1 || rest.first().is_some_and(|id| id.parse::<u32>().is_err()) {
                 return Err(anyhow!("usage: luvus pane transpose [<id>]"));
@@ -3650,12 +3573,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("pane.report_event".into(), with_pane(obj))
         }
-        ("pane", "" | "list") => match rest {
-            [] => ("pane.list".into(), json!({"all_tabs": true})),
-            [flag] if flag == "--all-tabs" => ("pane.list".into(), json!({"all_tabs": true})),
-            [flag] if flag == "--current-tab" => ("pane.list".into(), json!({"all_tabs": false})),
-            _ => return Err(anyhow!("usage: luvus pane list [--all-tabs|--current-tab]")),
-        },
+        ("pane", "" | "list") => ("pane.list".into(), parse_pane_list(rest)?),
         ("pane", other) => {
             return Err(anyhow!(
                 "unknown pane command `{other}`. Try `luvus help pane`."
@@ -4273,6 +4191,102 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         _ => return Err(anyhow!("unknown command. Try `luvus --help`.")),
     })
+}
+
+/// `pane list` scope: every tab of every workspace unless `--current-tab`.
+fn parse_pane_list(rest: &[String]) -> Result<Value> {
+    match rest {
+        [] => Ok(json!({"all_tabs": true})),
+        [flag] if flag == "--all-tabs" => Ok(json!({"all_tabs": true})),
+        [flag] if flag == "--current-tab" => Ok(json!({"all_tabs": false})),
+        _ => Err(anyhow!("usage: luvus pane list [--all-tabs|--current-tab]")),
+    }
+}
+
+/// `pane float` params: an optional numeric pane id, the geometry/title flags,
+/// `--no-focus`, and everything after `--` as the command argv.
+fn parse_pane_float(rest: &[String]) -> Result<Value> {
+    let (options, command) = match rest.iter().position(|arg| arg == "--") {
+        Some(index) => (&rest[..index], Some(&rest[index + 1..])),
+        None => (rest, None),
+    };
+    let mut obj = serde_json::Map::new();
+    let mut pane_id: Option<String> = None;
+    let mut index = 0;
+    while index < options.len() {
+        match options[index].as_str() {
+            "--no-focus" => {
+                if obj.contains_key("focus") {
+                    return Err(anyhow!("--no-focus may be passed only once"));
+                }
+                obj.insert("focus".to_string(), json!(false));
+                index += 1;
+            }
+            "--width" | "--height" | "--x" | "--y" | "--title" => {
+                let flag = options[index].clone();
+                let key = flag.trim_start_matches("--").to_string();
+                let raw = options
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow!("{flag} requires a value"))?;
+                if obj.contains_key(&key) {
+                    return Err(anyhow!("{flag} may be passed only once"));
+                }
+                obj.insert(key, pane_float_option_value(&flag, raw)?);
+                index += 2;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(anyhow!("{flag} is an unknown pane float option"));
+            }
+            raw => {
+                if pane_id.is_some() || raw.parse::<u32>().is_err() {
+                    return Err(anyhow!("pane id must be one numeric value"));
+                }
+                pane_id = Some(raw.to_string());
+                index += 1;
+            }
+        }
+    }
+    if let Some(command) = command {
+        obj.insert("command".to_string(), pane_float_command(command)?);
+    }
+    if let Some(pane) = pane_id.or_else(|| std::env::var("LUVUS_PANE_ID").ok()) {
+        obj.insert("pane".to_string(), json!(pane));
+    }
+    Ok(Value::Object(obj))
+}
+
+/// One `pane float` geometry or title flag value. Geometry flags are whole
+/// numbers; `--width`/`--height` must also leave room for the border and title.
+fn pane_float_option_value(flag: &str, raw: &str) -> Result<Value> {
+    let key = flag.trim_start_matches("--");
+    if key == "title" {
+        if raw.is_empty() || raw.starts_with("--") {
+            return Err(anyhow!("{flag} requires a value"));
+        }
+        return Ok(json!(raw));
+    }
+    let number = raw.parse::<u16>().map_err(|_| {
+        if matches!(key, "width" | "height") {
+            anyhow!("{flag} must be a whole number from 3 to 65535")
+        } else {
+            anyhow!("{flag} must be a whole number from 0 to 65535")
+        }
+    })?;
+    if matches!(key, "width" | "height") && number < crate::layout::MIN_FLOATING {
+        return Err(anyhow!("{flag} must be a whole number from 3 to 65535"));
+    }
+    Ok(json!(number))
+}
+
+/// Everything after `--` is the float pane command argv, never a flag.
+fn pane_float_command(command: &[String]) -> Result<Value> {
+    if command.is_empty() {
+        return Err(anyhow!("-- requires at least one command argument"));
+    }
+    if command.iter().any(String::is_empty) {
+        return Err(anyhow!("command arguments must not be empty"));
+    }
+    Ok(json!(command))
 }
 
 /// Collect values that follow every occurrence of `--name` up to the next flag,

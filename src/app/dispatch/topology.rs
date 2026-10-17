@@ -197,26 +197,7 @@ impl App {
                     "pane is floating".to_string(),
                 ));
             }
-            let axis = match p.get("direction") {
-                None | Some(Value::Null) => self.auto_split_axis_for(base),
-                Some(Value::String(dir)) => match dir.as_str() {
-                    "auto" => self.auto_split_axis_for(base),
-                    "down" | "stack" => Axis::Row,
-                    "right" => Axis::Col,
-                    _ => {
-                        return Err((
-                            "invalid_request".to_string(),
-                            "direction must be auto, right, or down".to_string(),
-                        ))
-                    }
-                },
-                Some(_) => {
-                    return Err((
-                        "invalid_request".to_string(),
-                        "direction must be auto, right, or down".to_string(),
-                    ))
-                }
-            };
+            let axis = split_axis(self, p, base)?;
             let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
             let new = self
                 .split_pane_in(base, axis, focus, cwd)
@@ -242,88 +223,43 @@ impl App {
                 "pane", "width", "height", "x", "y", "title", "focus", "command",
             ],
         )?;
-        let target = match p.get("pane") {
-            None | Some(Value::Null) => None,
-            Some(_) => Some(self.resolve_pane(p)?.ok_or_else(not_found)?),
-        };
-        let width = optional_u16_param(p, "width")?;
-        let height = optional_u16_param(p, "height")?;
-        for (key, value) in [("width", width), ("height", height)] {
-            if value.is_some_and(|value| value < crate::layout::MIN_FLOATING) {
-                return Err((
-                    "invalid_request".to_string(),
-                    format!("{key} must be at least {}", crate::layout::MIN_FLOATING),
-                ));
-            }
-        }
-        let x = optional_u16_param(p, "x")?;
-        let y = optional_u16_param(p, "y")?;
-        let title = match p.get("title") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(title)) => Some(title.clone()),
-            Some(_) => {
-                return Err((
-                    "invalid_request".to_string(),
-                    "title must be a string".to_string(),
-                ))
-            }
-        };
-        let focus = match p.get("focus") {
-            None | Some(Value::Null) => true,
-            Some(Value::Bool(focus)) => *focus,
-            Some(_) => {
-                return Err((
-                    "invalid_request".to_string(),
-                    "focus must be a boolean".to_string(),
-                ))
-            }
-        };
-        let command = match p.get("command") {
-            None | Some(Value::Null) => None,
-            Some(Value::Array(items)) => {
-                let mut argv = Vec::with_capacity(items.len());
-                for item in items {
-                    let argument = item.as_str().filter(|argument| !argument.is_empty());
-                    argv.push(argument.ok_or_else(|| {
-                        (
-                            "invalid_request".to_string(),
-                            "command must be an array of non-empty strings".to_string(),
-                        )
-                    })?);
-                }
-                if argv.is_empty() {
-                    return Err((
-                        "invalid_request".to_string(),
-                        "command must not be empty".to_string(),
-                    ));
-                }
-                Some(argv.into_iter().map(str::to_string).collect())
-            }
-            Some(_) => {
-                return Err((
-                    "invalid_request".to_string(),
-                    "command must be an array of strings".to_string(),
-                ))
-            }
-        };
-        let result = self
-            .float_pane(FloatingPaneRequest {
-                target,
-                width,
-                height,
-                x,
-                y,
-                title,
-                focus,
-                command,
-            })
-            .map_err(floating_pane_error)?;
+        let request = self.floating_pane_request(p)?;
+        let result = self.float_pane(request).map_err(floating_pane_error)?;
         Ok(json!({
             "type":"pane",
             "pane": result.pane.0.to_string(),
             "workspace": result.workspace.to_string(),
             "tab": (result.tab + 1).to_string(),
         }))
+    }
+
+    /// Validate every `pane.float` parameter, so an invalid request never
+    /// mutates state or spawns a PTY.
+    fn floating_pane_request(&self, p: &Value) -> Result<FloatingPaneRequest, (String, String)> {
+        let target = match p.get("pane") {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(self.resolve_pane(p)?.ok_or_else(not_found)?),
+        };
+        Ok(FloatingPaneRequest {
+            target,
+            width: floating_dimension(p, "width")?,
+            height: floating_dimension(p, "height")?,
+            x: optional_u16_param(p, "x")?,
+            y: optional_u16_param(p, "y")?,
+            title: floating_title(p)?,
+            focus: floating_focus(p)?,
+            command: floating_command(p)?,
+        })
+    }
+
+    /// `pane.split` and `pane.float` both create a pane; one router arm serves
+    /// both placements and the method name picks the handler.
+    pub(super) fn api_pane_split_or_float(&mut self, method: &str, p: &Value) -> DispatchResult {
+        if method == "pane.float" {
+            self.api_pane_float(method, p)
+        } else {
+            self.api_pane_split(method, p)
+        }
     }
 
     pub(super) fn api_pane_move(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -1984,6 +1920,93 @@ impl App {
                     .unwrap()
             })
             .collect())
+    }
+}
+
+/// `pane.split` direction: `auto` follows the base pane's shape, `down` and
+/// `stack` split a row, and `right` splits a column.
+fn split_axis(app: &App, p: &Value, base: PaneId) -> Result<Axis, (String, String)> {
+    let invalid = || {
+        (
+            "invalid_request".to_string(),
+            "direction must be auto, right, or down".to_string(),
+        )
+    };
+    match p.get("direction") {
+        None | Some(Value::Null) => Ok(app.auto_split_axis_for(base)),
+        Some(Value::String(dir)) => match dir.as_str() {
+            "auto" => Ok(app.auto_split_axis_for(base)),
+            "down" | "stack" => Ok(Axis::Row),
+            "right" => Ok(Axis::Col),
+            _ => Err(invalid()),
+        },
+        Some(_) => Err(invalid()),
+    }
+}
+
+/// Optional `pane.float` width or height: at least `MIN_FLOATING` cells.
+fn floating_dimension(p: &Value, key: &str) -> Result<Option<u16>, (String, String)> {
+    let value = optional_u16_param(p, key)?;
+    if value.is_some_and(|value| value < crate::layout::MIN_FLOATING) {
+        return Err((
+            "invalid_request".to_string(),
+            format!("{key} must be at least {}", crate::layout::MIN_FLOATING),
+        ));
+    }
+    Ok(value)
+}
+
+/// Optional `pane.float` title.
+fn floating_title(p: &Value) -> Result<Option<String>, (String, String)> {
+    match p.get("title") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(title)) => Ok(Some(title.clone())),
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            "title must be a string".to_string(),
+        )),
+    }
+}
+
+/// Optional `pane.float` focus flag; absent means the new pane takes focus.
+fn floating_focus(p: &Value) -> Result<bool, (String, String)> {
+    match p.get("focus") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(focus)) => Ok(*focus),
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            "focus must be a boolean".to_string(),
+        )),
+    }
+}
+
+/// Optional `pane.float` argv: a non-empty array of non-empty strings.
+fn floating_command(p: &Value) -> Result<Option<Vec<String>>, (String, String)> {
+    match p.get("command") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut argv = Vec::with_capacity(items.len());
+            for item in items {
+                let argument = item.as_str().filter(|argument| !argument.is_empty());
+                argv.push(argument.ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "command must be an array of non-empty strings".to_string(),
+                    )
+                })?);
+            }
+            if argv.is_empty() {
+                return Err((
+                    "invalid_request".to_string(),
+                    "command must not be empty".to_string(),
+                ));
+            }
+            Ok(Some(argv.into_iter().map(str::to_string).collect()))
+        }
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            "command must be an array of strings".to_string(),
+        )),
     }
 }
 

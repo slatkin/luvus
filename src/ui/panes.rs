@@ -435,37 +435,9 @@ pub(super) fn patch_terminal_damage(
 ) -> Result<(), ()> {
     let layout = app.layout();
     let panes = layout.all_panes();
-    if panes.len() != content_rects.len()
-        || panes.iter().any(|id| app.views.contains_key(id))
-        || panes
-            .iter()
-            .any(|id| !snapshots.contains_key(id) || !app.panes.contains_key(id))
-        || panes
-            .iter()
-            .any(|id| !content_rects.iter().any(|(pane, _)| pane == id))
-    {
+    if !damage_covers_every_pane(app, &panes, content_rects, snapshots) {
         return Err(());
     }
-    // A floating pane always paints a border, so its drawn rect is its content
-    // rect expanded by one cell. Deriving it from the client's own content
-    // geometry keeps the overlap test true for a passive render, which clamps
-    // for drawing only and never stores its rects in `App::pane_rects`.
-    let drawn_floating = |pane: PaneId| {
-        content_rects
-            .iter()
-            .find(|(candidate, _)| *candidate == pane)
-            .map(|(_, content)| {
-                Rect::new(
-                    content.x.saturating_sub(1),
-                    content.y.saturating_sub(1),
-                    content.width.saturating_add(2),
-                    content.height.saturating_add(2),
-                )
-            })
-    };
-
-    let theme = &app.theme;
-    let focus = layout.focus;
     let mut cursor = None;
     for (order, id) in panes.iter().copied().enumerate() {
         let content = content_rects
@@ -480,73 +452,11 @@ pub(super) fn patch_terminal_damage(
         // any covered cell in that row — not only the damaged ones — would be
         // erased. Fall back to the full renderer instead of leaving holes in the
         // pane above.
-        let id_floating = layout.is_floating(id);
         let covered = |row_rect: Rect| {
-            panes.iter().enumerate().any(|(other_order, other)| {
-                layout.is_floating(*other)
-                    && (!id_floating || other_order < order)
-                    && drawn_floating(*other).is_some_and(|rect| row_rect.intersects(rect))
-            })
+            row_covered_by_floating(layout, &panes, order, id, content_rects, row_rect)
         };
-        if snapshot.kind != crate::terminal::vt::DamageKind::Partial
-            || snapshot.composer_region.is_some()
-            || snapshot.scroll_offset != 0
-            || app
-                .status
-                .get(&id)
-                .is_some_and(|status| status.agent == "pi")
-        {
-            return Err(());
-        }
-
-        let blank = Style::new().bg(theme.mantle);
-        let buffer = f.buffer_mut();
-        let mut stack = [0u8; 4];
-        let mut combined = String::new();
-        for row in &snapshot.rows {
-            if row.row >= content.height {
-                continue;
-            }
-            let y = content.y + row.row;
-            let row_rect = Rect::new(content.x, y, content.width, 1);
-            if covered(row_rect) {
-                return Err(());
-            }
-            hyperlinks.retain(|link| !(link.pane == id && link.y == y));
-            for x in content.x..content.x.saturating_add(content.width) {
-                let cell = &mut buffer[(x, y)];
-                cell.reset();
-                cell.set_symbol(" ");
-                cell.set_style(blank);
-            }
-            for cell in &row.cells {
-                let style = terminal_cell_style(cell.style, theme, app.downsample);
-                let symbol: &str = if cell.zero_width.is_empty() {
-                    cell.character.encode_utf8(&mut stack)
-                } else {
-                    combined.clear();
-                    combined.push(cell.character);
-                    combined.extend(cell.zero_width.iter());
-                    &combined
-                };
-                paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
-            }
-            for hyperlink in &row.hyperlinks {
-                let start = hyperlink.start.min(content.width);
-                let end = hyperlink.end.min(content.width);
-                if start < end {
-                    push_rendered_hyperlink(
-                        hyperlinks,
-                        id,
-                        content.x + start,
-                        y,
-                        end - start,
-                        &hyperlink.uri,
-                    );
-                }
-            }
-        }
-        if id == focus {
+        patch_pane_damage(f, app, id, content, snapshot, &covered, hyperlinks)?;
+        if id == layout.focus {
             cursor = pane_ime_cursor(content, snapshot.cursor);
         }
     }
@@ -555,6 +465,132 @@ pub(super) fn patch_terminal_damage(
         f.set_cursor_anchor(x, y, visible);
     }
     hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
+    Ok(())
+}
+
+/// The damage ledger must describe exactly this frame's live panes: same count,
+/// no native views, and a snapshot and content rect for every pane.
+fn damage_covers_every_pane(
+    app: &App,
+    panes: &[PaneId],
+    content_rects: &[(PaneId, Rect)],
+    snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
+) -> bool {
+    panes.len() == content_rects.len()
+        && !panes.iter().any(|id| app.views.contains_key(id))
+        && !panes
+            .iter()
+            .any(|id| !snapshots.contains_key(id) || !app.panes.contains_key(id))
+        && !panes
+            .iter()
+            .any(|id| !content_rects.iter().any(|(pane, _)| pane == id))
+}
+
+/// The rect a floating pane draws into, derived from the client's own content
+/// geometry. A floating pane always paints a border, so its drawn rect is its
+/// content rect expanded by one cell; deriving it here keeps the overlap test
+/// true for a passive render, which clamps for drawing only and never stores its
+/// rects in `App::pane_rects`.
+fn floating_drawn_rect(content_rects: &[(PaneId, Rect)], pane: PaneId) -> Option<Rect> {
+    content_rects
+        .iter()
+        .find(|(candidate, _)| *candidate == pane)
+        .map(|(_, content)| {
+            Rect::new(
+                content.x.saturating_sub(1),
+                content.y.saturating_sub(1),
+                content.width.saturating_add(2),
+                content.height.saturating_add(2),
+            )
+        })
+}
+
+/// Whether a floating pane drawn above `id` covers any cell of `row_rect`.
+fn row_covered_by_floating(
+    layout: &crate::layout::TileLayout,
+    panes: &[PaneId],
+    order: usize,
+    id: PaneId,
+    content_rects: &[(PaneId, Rect)],
+    row_rect: Rect,
+) -> bool {
+    let id_floating = layout.is_floating(id);
+    panes.iter().enumerate().any(|(other_order, other)| {
+        layout.is_floating(*other)
+            && (!id_floating || other_order < order)
+            && floating_drawn_rect(content_rects, *other)
+                .is_some_and(|rect| row_rect.intersects(rect))
+    })
+}
+
+/// Patch one pane's damaged rows into the retained buffer.
+fn patch_pane_damage(
+    f: &mut RenderTarget,
+    app: &App,
+    id: PaneId,
+    content: Rect,
+    snapshot: &crate::terminal::vt::DamageSnapshot,
+    covered: &impl Fn(Rect) -> bool,
+    hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
+) -> Result<(), ()> {
+    if snapshot.kind != crate::terminal::vt::DamageKind::Partial
+        || snapshot.composer_region.is_some()
+        || snapshot.scroll_offset != 0
+        || app
+            .status
+            .get(&id)
+            .is_some_and(|status| status.agent == "pi")
+    {
+        return Err(());
+    }
+
+    let theme = &app.theme;
+    let blank = Style::new().bg(theme.mantle);
+    let buffer = f.buffer_mut();
+    let mut stack = [0u8; 4];
+    let mut combined = String::new();
+    for row in &snapshot.rows {
+        if row.row >= content.height {
+            continue;
+        }
+        let y = content.y + row.row;
+        if covered(Rect::new(content.x, y, content.width, 1)) {
+            return Err(());
+        }
+        hyperlinks.retain(|link| !(link.pane == id && link.y == y));
+        for x in content.x..content.x.saturating_add(content.width) {
+            let cell = &mut buffer[(x, y)];
+            cell.reset();
+            cell.set_symbol(" ");
+            cell.set_style(blank);
+        }
+        for cell in &row.cells {
+            let style = terminal_cell_style(cell.style, theme, app.downsample);
+            let symbol: &str = if cell.zero_width.is_empty() {
+                cell.character.encode_utf8(&mut stack)
+            } else {
+                combined.clear();
+                combined.push(cell.character);
+                combined.extend(cell.zero_width.iter());
+                &combined
+            };
+            paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
+        }
+        for hyperlink in &row.hyperlinks {
+            let start = hyperlink.start.min(content.width);
+            let end = hyperlink.end.min(content.width);
+            if start < end {
+                push_rendered_hyperlink(
+                    hyperlinks,
+                    id,
+                    content.x + start,
+                    y,
+                    end - start,
+                    &hyperlink.uri,
+                );
+            }
+        }
+    }
     Ok(())
 }
 

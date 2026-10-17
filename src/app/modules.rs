@@ -558,40 +558,8 @@ impl App {
         };
         let argv = entry.command.clone();
         let placement = placement.unwrap_or(entry.placement.as_str());
-
-        // A floating entry validates its tab and geometry before the spawn, like
-        // `pane.float`, so an invalid manifest never leaves a PTY behind.
         let floating = if placement == "floating" {
-            let workspace = self.active_ws;
-            let tab = self
-                .workspaces
-                .get(workspace)
-                .map(|workspace| workspace.active_tab)
-                .ok_or_else(|| {
-                    format!("module {module_id} has no workspace for a floating pane")
-                })?;
-            self.validate_floating_target(workspace, tab).map_err(|_| {
-                format!("module {module_id} cannot open a floating pane in this tab")
-            })?;
-            let area = self.split_area();
-            let (default_width, default_height) = crate::layout::default_floating_size(area);
-            let width = entry.width.unwrap_or(default_width);
-            let height = entry.height.unwrap_or(default_height);
-            if width < crate::layout::MIN_FLOATING || height < crate::layout::MIN_FLOATING {
-                return Err(format!(
-                    "pane {}: width and height must be at least {}",
-                    entry.id,
-                    crate::layout::MIN_FLOATING
-                ));
-            }
-            let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
-            let cascade = (entry.x.is_none() || entry.y.is_none()).then(|| {
-                crate::layout::cascade_floating_position(area, width, height, last_cascade)
-            });
-            let x = entry.x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
-            let y = entry.y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
-            let geometry = crate::layout::clamp_floating_rect(Rect::new(x, y, width, height), area);
-            Some((workspace, tab, geometry, x, y))
+            Some(self.module_floating_geometry(&module_id, &entry)?)
         } else {
             None
         };
@@ -636,6 +604,68 @@ impl App {
         self.status.insert(id, PaneStatus::new(cmd));
         self.session_dirty = true;
 
+        self.place_module_pane(id, &module_id, &entry, placement, floating)?;
+        self.module_panes.insert(
+            id,
+            ModulePaneRecord {
+                module_id: module_id.clone(),
+                entrypoint: entrypoint.to_string(),
+            },
+        );
+        self.emit_event(
+            "pane.created",
+            json!({"pane": id.0.to_string(), "module": module_id}),
+        );
+        Ok(id)
+    }
+
+    /// Validate a floating `[[panes]]` entry's tab and geometry before the
+    /// spawn, like `pane.float`, so an invalid manifest never leaves a PTY
+    /// behind.
+    fn module_floating_geometry(
+        &self,
+        module_id: &str,
+        entry: &crate::module::manifest::PaneEntry,
+    ) -> Result<(usize, usize, Rect, u16, u16), String> {
+        let workspace = self.active_ws;
+        let tab = self
+            .workspaces
+            .get(workspace)
+            .map(|workspace| workspace.active_tab)
+            .ok_or_else(|| format!("module {module_id} has no workspace for a floating pane"))?;
+        self.validate_floating_target(workspace, tab)
+            .map_err(|_| format!("module {module_id} cannot open a floating pane in this tab"))?;
+        let area = self.split_area();
+        let (default_width, default_height) = crate::layout::default_floating_size(area);
+        let width = entry.width.unwrap_or(default_width);
+        let height = entry.height.unwrap_or(default_height);
+        if width < crate::layout::MIN_FLOATING || height < crate::layout::MIN_FLOATING {
+            return Err(format!(
+                "pane {}: width and height must be at least {}",
+                entry.id,
+                crate::layout::MIN_FLOATING
+            ));
+        }
+        let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
+        let cascade = (entry.x.is_none() || entry.y.is_none())
+            .then(|| crate::layout::cascade_floating_position(area, width, height, last_cascade));
+        let x = entry.x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
+        let y = entry.y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
+        let geometry = crate::layout::clamp_floating_rect(Rect::new(x, y, width, height), area);
+        Ok((workspace, tab, geometry, x, y))
+    }
+
+    /// Place a freshly spawned module pane per its entry's placement. A floating
+    /// pane takes focus and shows the entry title; a failed attach must not leak
+    /// the spawned PTY.
+    fn place_module_pane(
+        &mut self,
+        id: PaneId,
+        module_id: &str,
+        entry: &crate::module::manifest::PaneEntry,
+        placement: &str,
+        floating: Option<(usize, usize, Rect, u16, u16)>,
+    ) -> Result<(), String> {
         match placement {
             "tab" => {
                 let ws = &mut self.workspaces[self.active_ws];
@@ -651,8 +681,6 @@ impl App {
                 let Some((workspace, tab, geometry, x, y)) = floating else {
                     return Err(format!("module {module_id} has no floating geometry"));
                 };
-                // The spec makes a floating module pane take focus and show the
-                // entry title. A failed attach must not leak the spawned PTY.
                 if let Err(error) = self.attach_floating(
                     id,
                     workspace,
@@ -679,18 +707,7 @@ impl App {
                 self.zoomed = false;
             }
         }
-        self.module_panes.insert(
-            id,
-            ModulePaneRecord {
-                module_id: module_id.clone(),
-                entrypoint: entrypoint.to_string(),
-            },
-        );
-        self.emit_event(
-            "pane.created",
-            json!({"pane": id.0.to_string(), "module": module_id}),
-        );
-        Ok(id)
+        Ok(())
     }
 
     /// Run an argv command for a module against the focused workspace/pane.

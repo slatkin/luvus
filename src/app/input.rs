@@ -3125,19 +3125,7 @@ impl App {
             self.close_tab(*i);
             return;
         }
-        // Pane chrome belongs to the topmost pane. A floating pane can cover the
-        // focused tiled pane's ✕ and ⤢ buttons; the covered chrome must not fire,
-        // so the press falls through to focus the pane that is actually on top.
-        let chrome_visible = self.topmost_pane_at(c, r) == Some(self.layout().focus);
-        // The focused pane's ✕ button closes the active pane.
-        if chrome_visible && self.pane_close_rect.is_some_and(hit) {
-            self.close_pane(self.layout().focus);
-            return;
-        }
-        // Its ⤢ button toggles zoom — the touch equivalent of `Ctrl+Space z`, so
-        // a split can be expanded to fullscreen on a phone (docs/18).
-        if chrome_visible && self.pane_zoom_rect.is_some_and(hit) {
-            self.zoomed = !self.zoomed;
+        if self.press_focused_pane_chrome(c, r) {
             return;
         }
         // Tab-bar scroll arrows: step to the previous / next tab.
@@ -4041,6 +4029,27 @@ impl App {
             .iter()
             .find(|(_, rect)| x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom())
             .map(|(id, _)| *id)
+    }
+
+    /// The focused pane's ✕ and ⤢ buttons. Pane chrome belongs to the topmost
+    /// pane: a floating pane can cover the focused tiled pane's buttons, and
+    /// covered chrome must not fire, so the press falls through to focus the
+    /// pane that is actually on top. Returns true when the press was consumed.
+    fn press_focused_pane_chrome(&mut self, c: u16, r: u16) -> bool {
+        let hit = |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
+        let chrome_visible = self.topmost_pane_at(c, r) == Some(self.layout().focus);
+        // The ✕ button closes the active pane.
+        if chrome_visible && self.pane_close_rect.is_some_and(hit) {
+            self.close_pane(self.layout().focus);
+            return true;
+        }
+        // The ⤢ button toggles zoom — the touch equivalent of `Ctrl+Space z`, so
+        // a split can be expanded to fullscreen on a phone (docs/18).
+        if chrome_visible && self.pane_zoom_rect.is_some_and(hit) {
+            self.zoomed = !self.zoomed;
+            return true;
+        }
+        false
     }
 
     /// `pub(super)` so the resize hit-test in `app` can share this exact rule:

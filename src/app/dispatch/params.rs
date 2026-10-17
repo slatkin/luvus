@@ -40,6 +40,7 @@ pub(in crate::app::dispatch) fn check_agent_terminal_id(
 pub(in crate::app::dispatch) fn pane_move_error(err: PaneMoveError) -> (String, String) {
     let message = match err {
         PaneMoveError::PaneNotFound => "pane not found",
+        PaneMoveError::FloatingPane => "pane is floating",
         PaneMoveError::SourceNotPaneTab => "source pane is not in a normal pane tab",
         PaneMoveError::TargetOutOfRange => "destination tab is out of range",
         PaneMoveError::SameTab => "source and destination tabs must differ",
@@ -103,6 +104,7 @@ pub(in crate::app::dispatch) fn workspace_update_error(
 pub(in crate::app::dispatch) fn agent_fork_error(err: AgentForkError) -> (String, String) {
     let (code, message) = match err {
         AgentForkError::PaneNotFound => ("not_found", "agent pane not found"),
+        AgentForkError::FloatingPane => ("invalid_request", "pane is floating"),
         AgentForkError::SourceNotPaneTab => {
             ("invalid_request", "agent pane is not in a normal pane tab")
         }

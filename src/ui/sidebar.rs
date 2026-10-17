@@ -22,7 +22,7 @@ pub(crate) fn rollup(app: &App, ws_index: usize) -> State {
     let mut best = State::Idle;
     if let Some(ws) = app.workspaces.get(ws_index) {
         for tab in &ws.tabs {
-            for id in tab.layout.leaves() {
+            for id in tab.layout.all_panes() {
                 let s = pane_state(app, id);
                 if attention(s) > attention(best) {
                     best = s;
@@ -639,7 +639,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     for (wi, ws) in app.workspaces.iter().enumerate() {
         let visible = !scoped || wi == app.active_ws;
         for tab in &ws.tabs {
-            for id in tab.layout.leaves() {
+            for id in tab.layout.all_panes() {
                 if let Some(s) = app.status.get(&id) {
                     let is_agent = app.manifests.is_agent(&s.agent) || s.agent_session.is_some();
                     if !is_agent {
@@ -2191,5 +2191,36 @@ mod dock_tone_tests {
             t.subtext1,
             "the ellipsis takes the colour of a span that was drawn, not the dropped one"
         );
+    }
+
+    /// The workspace rollup walks every pane in a tab, including floating ones,
+    /// so a blocked floating agent still marks its workspace.
+    #[test]
+    fn workspace_rollup_includes_a_floating_pane() {
+        use crate::app::{App, FloatingPaneRequest};
+        use crate::ui::theme::State;
+
+        let _env = crate::persist::test_env("sidebar-rollup-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(FloatingPaneRequest {
+                target: None,
+                width: None,
+                height: None,
+                x: None,
+                y: None,
+                title: None,
+                focus: true,
+                command: None,
+            })
+            .unwrap()
+            .pane;
+        app.status
+            .get_mut(&floating)
+            .expect("floating status")
+            .state = State::Blocked;
+
+        assert_eq!(super::rollup(&app, 0), State::Blocked);
     }
 }

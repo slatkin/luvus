@@ -1055,6 +1055,7 @@ pub enum MoveTarget {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PaneMoveError {
     PaneNotFound,
+    FloatingPane,
     SourceNotPaneTab,
     TargetOutOfRange,
     SameTab,
@@ -1136,6 +1137,7 @@ pub enum TabRenameError {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentForkError {
     PaneNotFound,
+    FloatingPane,
     SourceNotPaneTab,
     UnsupportedAgent,
     SessionUnknown,
@@ -5645,9 +5647,15 @@ impl App {
         let rect = self
             .pane_location(pane)
             .and_then(|(workspace, tab)| {
-                self.workspaces[workspace].tabs[tab]
-                    .layout
-                    .pane_rect(area, pane)
+                let layout = &self.workspaces[workspace].tabs[tab].layout;
+                // Floating panes have no tree rect, so an automatic split sizes
+                // the tile it will actually divide.
+                let pane = if layout.is_floating(pane) {
+                    layout.tiled_focus
+                } else {
+                    pane
+                };
+                layout.pane_rect(area, pane)
             })
             .unwrap_or(area);
         if painted {
@@ -5665,6 +5673,8 @@ impl App {
     /// axis from that pane's current aspect ratio.
     fn split_focused_auto(&mut self, new_id: PaneId) {
         let focus = self.layout().focus;
+        // A floating focus splits the last tiled pane; the axis follows that
+        // tile so the attach point and the geometry agree.
         let axis = self.auto_split_axis_for(focus);
         self.layout_mut().split_focused(axis, new_id);
     }
@@ -5937,10 +5947,13 @@ impl App {
             .find_map(|(wi, ws)| {
                 ws.tabs
                     .iter()
-                    .position(|tab| tab.layout.leaves().contains(&pane))
+                    .position(|tab| tab.layout.contains(pane))
                     .map(|tab| (wi, tab))
             })
             .ok_or(AgentForkError::SourceNotPaneTab)?;
+        if self.workspaces[wsi].tabs[ti].layout.is_floating(pane) {
+            return Err(AgentForkError::FloatingPane);
+        }
         if !self.workspaces[wsi].tabs[ti].is_renameable() {
             return Err(AgentForkError::SourceNotPaneTab);
         }
@@ -6780,7 +6793,7 @@ impl App {
         let tab = self.workspaces.get(workspace)?.tabs.get(index)?;
         Some(TabMenuTarget {
             workspace,
-            leaves: tab.layout.leaves(),
+            leaves: tab.layout.all_panes(),
         })
     }
 
@@ -6789,7 +6802,7 @@ impl App {
         let index = ws
             .tabs
             .iter()
-            .position(|tab| tab.layout.leaves() == target.leaves)?;
+            .position(|tab| tab.layout.all_panes() == target.leaves)?;
         Some((target.workspace, index))
     }
 
@@ -7938,11 +7951,14 @@ impl App {
             .find_map(|(wi, ws)| {
                 ws.tabs
                     .iter()
-                    .position(|tab| tab.layout.leaves().contains(&pane))
+                    .position(|tab| tab.layout.contains(pane))
                     .map(|ti| (wi, ti))
             })
             .ok_or(PaneMoveError::PaneNotFound)?;
 
+        if self.workspaces[wsi].tabs[src].layout.is_floating(pane) {
+            return Err(PaneMoveError::FloatingPane);
+        }
         if !self.workspaces[wsi].tabs[src].is_renameable() {
             return Err(PaneMoveError::SourceNotPaneTab);
         }
@@ -9364,14 +9380,14 @@ impl App {
     /// Cycle focus within the current tab's leaf order, wrapping at both ends.
     /// Used by tmux-style `o` and the mobile header's previous/next halves.
     fn cycle_pane(&mut self, delta: isize) {
-        let leaves = self.layout().leaves();
-        if leaves.len() < 2 {
+        let panes = self.layout().all_panes();
+        if panes.len() < 2 {
             return;
         }
         let focus = self.layout().focus;
-        let idx = leaves.iter().position(|&id| id == focus).unwrap_or(0);
-        let len = leaves.len() as isize;
-        let next = leaves[((idx as isize + delta) % len + len) as usize % leaves.len()];
+        let idx = panes.iter().position(|&id| id == focus).unwrap_or(0);
+        let len = panes.len() as isize;
+        let next = panes[((idx as isize + delta) % len + len) as usize % panes.len()];
         self.focus_pane_global(next);
     }
 
@@ -17391,6 +17407,28 @@ fi
         rclick(&mut app, r1);
         assert!(app.dock_menu.is_none(), "no menu for an undeclared row");
         assert!(app.pane_menu.is_none(), "and no pane menu underneath it");
+    }
+
+    /// Floating panes have no tile to split, transpose or resize, so the app
+    /// rejects moving and forking them instead of acting on the tile behind.
+    #[test]
+    fn tiled_only_app_operations_reject_a_floating_pane() {
+        let _env = crate::persist::test_env("floating-tiled-only-app-ops");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, None, true))
+            .unwrap()
+            .pane;
+
+        assert_eq!(
+            app.move_pane_to_tab(floating, MoveTarget::NewTab),
+            Err(PaneMoveError::FloatingPane)
+        );
+        assert_eq!(
+            app.fork_agent_pane(floating, true),
+            Err(AgentForkError::FloatingPane)
+        );
     }
 
     /// Moving a pane to another tab re-parents its id between layout trees — the

@@ -1,6 +1,6 @@
 use super::super::*;
 use super::support::*;
-use crate::app::App;
+use crate::app::{App, FloatingPaneRequest};
 
 #[test]
 fn topology_queries_and_mutations_share_the_live_layout() {
@@ -347,6 +347,66 @@ fn pane_list_all_tabs_discovers_inactive_panes_without_changing_focus() {
         let error = app.dispatch("pane.list", &params).unwrap_err();
         assert_eq!(error.0, "invalid_request", "params: {params}");
     }
+}
+
+#[test]
+fn pane_list_and_tab_get_include_a_focused_floating_pane() {
+    let (_env, mut app) = app("pane-list-floating");
+    let tiled = app.layout().focus;
+    let floating = app
+        .float_pane(FloatingPaneRequest {
+            target: None,
+            width: None,
+            height: None,
+            x: None,
+            y: None,
+            title: None,
+            focus: true,
+            command: None,
+        })
+        .unwrap()
+        .pane;
+    assert_eq!(app.layout().focus, floating);
+
+    let listed = app
+        .dispatch("pane.list", &json!({"all_tabs": false}))
+        .unwrap();
+    let rows = listed["panes"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "the floating pane is listed with the tiled one"
+    );
+    let row = |id: PaneId| {
+        rows.iter()
+            .find(|row| {
+                row["pane"]
+                    .as_str()
+                    .and_then(|pane| pane.parse::<u32>().ok())
+                    == Some(id.0)
+            })
+            .expect("pane is listed")
+    };
+    assert_eq!(
+        row(floating)["focused"],
+        true,
+        "the floating focus lights up"
+    );
+    assert_eq!(row(floating)["tab"], "1");
+    assert_eq!(row(tiled)["focused"], false);
+
+    let tab = app
+        .dispatch("tab.get", &json!({"workspace": "0", "tab": "1"}))
+        .unwrap();
+    assert_eq!(tab["focus"], floating.0.to_string());
+    let panes: Vec<&str> = tab["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pane| pane.as_str().unwrap())
+        .collect();
+    assert!(panes.contains(&floating.0.to_string().as_str()));
+    assert!(panes.contains(&tiled.0.to_string().as_str()));
 }
 
 #[test]

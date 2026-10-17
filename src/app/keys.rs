@@ -962,6 +962,25 @@ impl App {
 
     /// Run a prefix command.
     pub fn run_cmd(&mut self, cmd: Cmd) {
+        // Split, transpose and resize act on the tiled tree. A floating pane has
+        // no tree geometry, so these show a notice instead of acting on the last
+        // focused tile behind the user's back.
+        if matches!(
+            cmd,
+            Cmd::SplitRight
+                | Cmd::SplitDown
+                | Cmd::SplitAuto
+                | Cmd::TransposePane
+                | Cmd::ResizeMode
+        ) && self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+            .is_some_and(|tab| tab.layout.is_floating(tab.layout.focus))
+        {
+            self.show_toast(self.catalog.floating_tiled_only);
+            return;
+        }
         match cmd {
             Cmd::FocusLeft => self.focus_dir(Dir::Left),
             Cmd::FocusDown => self.focus_dir(Dir::Down),
@@ -1764,6 +1783,73 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert_eq!(app.ws().tabs.len(), tabs + 1, "F12 prefix opens a tab");
+    }
+
+    #[test]
+    fn prefix_split_and_other_tiled_only_commands_notice_a_floating_pane() {
+        use crate::event::AppEvent;
+
+        let _env = crate::persist::test_env("floating-tiled-only-keys");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(FloatingPaneRequest {
+                target: None,
+                width: None,
+                height: None,
+                x: None,
+                y: None,
+                title: None,
+                focus: true,
+                command: None,
+            })
+            .unwrap()
+            .pane;
+        assert_eq!(app.layout().focus, floating);
+        let leaves = app.layout().leaves();
+        let panes = app.panes.len();
+        let notice = app.catalog.floating_tiled_only;
+
+        // The real prefix binding: Ctrl+Space then `v` (split right).
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.mode, Mode::Prefix);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.layout().leaves(),
+            leaves,
+            "prefix split creates no tile"
+        );
+        assert_eq!(app.panes.len(), panes, "prefix split spawns no pane");
+        assert_eq!(app.layout().focus, floating);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some(notice),
+            "prefix split explains the floating pane"
+        );
+
+        for cmd in [
+            Cmd::SplitDown,
+            Cmd::SplitAuto,
+            Cmd::TransposePane,
+            Cmd::ResizeMode,
+        ] {
+            app.toast = None;
+            app.run_cmd(cmd);
+            assert_eq!(app.layout().leaves(), leaves, "{cmd:?} creates no tile");
+            assert_eq!(app.layout().focus, floating, "{cmd:?} keeps focus");
+            assert_eq!(app.mode, Mode::Normal, "{cmd:?} enters no mode");
+            assert_eq!(
+                app.toast.as_ref().map(|(text, _)| text.as_str()),
+                Some(notice),
+                "{cmd:?} shows the notice"
+            );
+        }
     }
 
     #[test]

@@ -91,7 +91,7 @@ impl App {
                     if tab.is_git() || tab.is_orch() || tab.is_mission() {
                         continue;
                     }
-                    for id in tab.layout.leaves() {
+                    for id in tab.layout.all_panes() {
                         let (agent, status) = self
                             .status
                             .get(&id)
@@ -1734,7 +1734,7 @@ impl App {
             "tab":(tab+1).to_string(), "tab_id":value.id,
             "active":workspace == self.active_ws && tab == ws.active_tab,
             "name":value.name, "kind":kind, "focus":value.layout.focus.0.to_string(),
-            "panes":value.layout.leaves().into_iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
+            "panes":value.layout.all_panes().into_iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
         }))
     }
 

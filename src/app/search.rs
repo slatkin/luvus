@@ -277,11 +277,11 @@ impl App {
                         ws: wi,
                         tab: ti,
                         workspace_cwd: ws.cwd.clone(),
-                        tab_leaves: tab.layout.leaves(),
+                        tab_leaves: tab.layout.all_panes(),
                     },
                     wi == self.active_ws && ti == ws.active_tab,
                 ));
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     let Some(pane) = self.panes.get(&id) else {
                         continue;
                     };
@@ -461,7 +461,7 @@ impl App {
         let mut targets = Vec::new();
         for ws in &self.workspaces {
             for (ti, tab) in ws.tabs.iter().enumerate() {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     let Some(pane) = self.panes.get(&id) else {
                         continue;
                     };
@@ -732,7 +732,7 @@ impl App {
         let mut total = 0usize;
         for (wi, ws) in self.workspaces.iter().enumerate() {
             for tab in &ws.tabs {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     let Some(pane) = self.panes.get(&id) else {
                         continue;
                     };

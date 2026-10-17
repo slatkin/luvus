@@ -436,6 +436,9 @@ impl App {
                         AgentForkError::PaneNotFound | AgentForkError::SourceNotPaneTab => {
                             format!("p{} is no longer a live pane", id.0)
                         }
+                        AgentForkError::FloatingPane => {
+                            format!("p{} is a floating pane and cannot be forked", id.0)
+                        }
                         AgentForkError::UnsupportedAgent => {
                             format!("p{} does not support session forking", id.0)
                         }

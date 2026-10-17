@@ -1093,7 +1093,7 @@ impl App {
         let mut matches = Vec::new();
         for ws in &self.workspaces {
             for tab in &ws.tabs {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     if let Some(status) = self.status.get(&id) {
                         let is_agent = self.manifests.is_agent(&status.agent)
                             || status.agent_session.is_some();

@@ -4795,7 +4795,7 @@ impl App {
         for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
             let visible = !scoped || workspace_index == self.active_ws;
             for tab in &workspace.tabs {
-                for pane in tab.layout.leaves() {
+                for pane in tab.layout.all_panes() {
                     let Some(status) = self.status.get(&pane) else {
                         continue;
                     };
@@ -5625,7 +5625,7 @@ impl App {
     }
 
     /// Whether `pane` is floating in its tab.
-    fn is_floating_pane(&self, pane: PaneId) -> bool {
+    pub(crate) fn is_floating_pane(&self, pane: PaneId) -> bool {
         self.pane_location(pane).is_some_and(|(workspace, tab)| {
             self.workspaces
                 .get(workspace)
@@ -6605,7 +6605,7 @@ impl App {
         let mut target_panes = std::collections::BTreeSet::new();
         for workspace in &self.workspaces {
             if same_target(&workspace.cwd) {
-                for pane in workspace.tabs.iter().flat_map(|tab| tab.layout.leaves()) {
+                for pane in workspace.tabs.iter().flat_map(|tab| tab.layout.all_panes()) {
                     if self.panes.contains_key(&pane) {
                         target_panes.insert(pane.0);
                     }
@@ -7352,7 +7352,7 @@ impl App {
             }
             paths.push(workspace.cwd.clone());
             for tab in &workspace.tabs {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     if let Some(pane) = self.panes.get(&id) {
                         paths.push(pane.cwd.clone());
                     }
@@ -9313,7 +9313,7 @@ impl App {
     pub fn workspace_of_pane(&self, id: PaneId) -> Option<&Workspace> {
         self.workspaces
             .iter()
-            .find(|ws| ws.tabs.iter().any(|t| t.layout.leaves().contains(&id)))
+            .find(|ws| ws.tabs.iter().any(|t| t.layout.contains(id)))
     }
 
     /// The reusable preview owned by the active workspace, if it is still a
@@ -10596,7 +10596,7 @@ mod tests {
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.tabs.iter())
-            .flat_map(|tab| tab.layout.leaves())
+            .flat_map(|tab| tab.layout.all_panes())
             .collect();
         for pane in panes {
             app.drop_leaf_runtime(pane);
@@ -12208,6 +12208,97 @@ mod tests {
             app.bar.overflow.is_some(),
             "the modal owns the click before hidden bar hit targets"
         );
+    }
+
+    #[test]
+    fn agents_dock_targets_and_workspace_lookup_cover_a_floating_agent() {
+        let _env = crate::persist::test_env("dock-floating-agent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, None, false))
+            .unwrap()
+            .pane;
+        let status = app.status.get_mut(&floating).expect("floating status");
+        status.agent = "codex".into();
+        status.state = crate::ui::theme::State::Idle;
+
+        let rows = app.agent_dock_targets();
+        assert!(
+            rows.contains(&AgentDockTarget::Live(floating)),
+            "the dock rows keep the renderer's floating row: {rows:?}"
+        );
+        assert_eq!(
+            app.workspace_of_pane(floating)
+                .map(|workspace| &workspace.id),
+            Some(&app.ws().id),
+            "a floating pane still belongs to its workspace"
+        );
+    }
+
+    #[test]
+    fn force_empty_session_drops_a_floating_runtime() {
+        let _env = crate::persist::test_env("empty-session-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(floating_request(None, Some(shell_command(&app)), false))
+            .unwrap()
+            .pane;
+        assert!(app.panes[&floating].terminal_runtime().is_some());
+
+        force_empty_session(&mut app);
+
+        assert!(
+            !app.panes.contains_key(&floating),
+            "the floating pane's runtime is dropped with the session"
+        );
+        assert!(app.panes.is_empty());
+        assert!(app.workspaces.is_empty());
+    }
+
+    #[test]
+    fn worktree_scans_cover_floating_panes() {
+        let _env = crate::persist::test_env("wt-floating-scan");
+        let base = std::env::temp_dir().join(format!("luvus-wt-floating-{}", std::process::id()));
+        let root = base.join("target");
+        let nested = root.join("nested");
+        let elsewhere = base.join("elsewhere");
+        let outside = base.join("outside");
+        for dir in [&root, &nested, &elsewhere, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = root.clone();
+        let target = app.workspaces[0].id.clone();
+        assert!(app.create_workspace_at(elsewhere.clone()));
+        app.workspaces[1].cwd = elsewhere.clone();
+        // A floating pane in another workspace whose own cwd is under the
+        // deletion target: its filesystem context disappears with the worktree.
+        let foreign = app
+            .float_pane(floating_request(None, None, false))
+            .unwrap()
+            .pane;
+        app.panes.get_mut(&foreign).unwrap().cwd = nested.clone();
+        // A floating pane in the target workspace with a cwd outside it: it is
+        // still a pane of that workspace, so its terminal dies with the target.
+        app.active_ws = 0;
+        let anchored = app
+            .float_pane(floating_request(None, None, false))
+            .unwrap()
+            .pane;
+        app.panes.get_mut(&anchored).unwrap().cwd = outside.clone();
+
+        assert!(
+            app.other_worktree_paths(&target).contains(&nested),
+            "the floating pane's directory blocks deletion from another workspace"
+        );
+        assert!(
+            app.worktree_target_panes(&root).contains(&anchored.0),
+            "a floating pane of the target workspace is a target pane"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

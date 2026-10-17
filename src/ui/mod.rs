@@ -825,10 +825,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // control remains available.
     let lone_header = !bordered && !app.compact && (app.config.layout.show_titles || app.zoomed);
     if resize_panes {
-        let tiled_content = tiled.iter().map(|(id, rect)| (*id, *rect, bordered));
-        let floating_content = floating.iter().map(|(id, rect)| (*id, *rect, true));
-        for (id, rect, pane_bordered) in tiled_content.chain(floating_content) {
-            let Some(content) = pane_content(rect, pane_bordered, app.compact, lone_header) else {
+        let tiled_content = tiled
+            .iter()
+            .map(|(id, rect)| (*id, pane_content(*rect, bordered, app.compact, lone_header)));
+        let floating_content = floating
+            .iter()
+            .map(|(id, rect)| (*id, floating_pane_content(*rect)));
+        for (id, content) in tiled_content.chain(floating_content) {
+            let Some(content) = content else {
                 continue;
             };
             let resized = app
@@ -941,9 +945,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         let floating_content: Vec<(PaneId, Rect)> = floating
             .iter()
             .rev()
-            .filter_map(|(id, rect)| {
-                pane_content(*rect, true, app.compact, false).map(|content| (*id, content))
-            })
+            .filter_map(|(id, rect)| floating_pane_content(*rect).map(|content| (*id, content)))
             .collect();
         let tiled_content: Vec<(PaneId, Rect)> = tiled
             .iter()
@@ -2145,6 +2147,24 @@ fn pane_content(rect: Rect, bordered: bool, mobile: bool, lone_header: bool) -> 
     Some(c)
 }
 
+/// The terminal content area of a floating pane: inside its border.
+///
+/// A floating pane may be as small as [`crate::layout::MIN_FLOATING`] (3x3 outer
+/// cells), so its content can be a single cell. [`pane_inner`] keeps its 4x4
+/// guard for tiled panes, whose minimum is [`crate::layout::MIN_PANE`] and whose
+/// lone form draws a header instead of a border.
+fn floating_pane_content(rect: Rect) -> Option<Rect> {
+    if rect.width < crate::layout::MIN_FLOATING || rect.height < crate::layout::MIN_FLOATING {
+        return None;
+    }
+    Some(Rect::new(
+        rect.x + 1,
+        rect.y + 1,
+        rect.width - 2,
+        rect.height - 2,
+    ))
+}
+
 /// Rect of the ✕ close button at the right of a pane's top-border title row.
 fn pane_close_rect(area: Rect, bordered: bool) -> Option<Rect> {
     if !bordered || area.width < 9 {
@@ -2729,6 +2749,76 @@ mod floating_render_tests {
         assert!(
             projected.x < active_content.x,
             "the smaller client draws the pane further left"
+        );
+    }
+
+    #[test]
+    fn a_three_by_three_floating_pane_draws_one_content_cell() {
+        let _env = crate::persist::test_env("floating-render-min-size");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        app.config.layout.mobile_width = 40;
+        let floating = add_floating(&mut app, (0, 0, 3, 3), None);
+        let _responses = paint(&mut app, floating, "z");
+
+        let buffer = render_at(&mut app, 120, 40);
+
+        let rect = rect_of(&app, floating);
+        assert_eq!((rect.width, rect.height), (3, 3));
+        let content = content_of(&app, floating);
+        assert_eq!(
+            content,
+            Rect::new(rect.x + 1, rect.y + 1, 1, 1),
+            "the minimum floating pane keeps its single content cell"
+        );
+        assert_eq!(
+            app.panes[&floating].size(),
+            (1, 1),
+            "the PTY follows the one-cell content rect"
+        );
+        assert_eq!(buffer[(content.x, content.y)].symbol(), "z");
+    }
+
+    #[test]
+    fn minimum_floating_sizes_resize_their_ptys() {
+        let _env = crate::persist::test_env("floating-render-min-sizes");
+        for (width, height, expected) in [(4, 3, (2, 1)), (3, 4, (1, 2))] {
+            let (tx, _rx) = mpsc::channel();
+            let mut app = App::new(120, 40, tx).expect("app starts");
+            app.config.layout.mobile_width = 40;
+            let floating = add_floating(&mut app, (0, 0, width, height), None);
+
+            render_at(&mut app, 120, 40);
+
+            let content = content_of(&app, floating);
+            assert_eq!(
+                (content.width, content.height),
+                expected,
+                "{width}x{height}"
+            );
+            assert_eq!(app.panes[&floating].size(), expected, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn tiled_content_geometry_keeps_its_four_by_four_minimum() {
+        assert_eq!(
+            pane_content(Rect::new(0, 0, 4, 4), true, false, false),
+            Some(Rect::new(1, 1, 2, 2))
+        );
+        assert_eq!(
+            pane_content(Rect::new(0, 0, 3, 3), true, false, false),
+            None,
+            "tiled content keeps its 4x4 guard"
+        );
+        assert_eq!(
+            floating_pane_content(Rect::new(0, 0, 3, 3)),
+            Some(Rect::new(1, 1, 1, 1))
+        );
+        assert_eq!(
+            floating_pane_content(Rect::new(0, 0, 2, 3)),
+            None,
+            "a floating rect below the minimum has no content"
         );
     }
 

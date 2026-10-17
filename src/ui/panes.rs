@@ -350,7 +350,8 @@ pub(super) fn draw_panes(
             rendered_hyperlinks: &mut rendered_hyperlinks,
         };
         for (id, rect) in rects {
-            if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, &mut context, t) {
+            let content = pane_content(*rect, bordered, context.app.compact, lone_header);
+            if let Some(c) = draw_one_pane(f, *rect, content, *id, *id == focus, &mut context, t) {
                 cursor = Some(c);
             }
         }
@@ -399,7 +400,8 @@ pub(super) fn draw_floating_panes(
             // Clear border cells too: the pane below must not show through.
             f.render_widget(Block::new().style(Style::new().bg(t.mantle)), *rect);
             let focused = *id == focus;
-            if let Some(c) = draw_one_pane(f, *rect, *id, focused, true, &mut context, t) {
+            let content = floating_pane_content(*rect);
+            if let Some(c) = draw_one_pane(f, *rect, content, *id, focused, &mut context, t) {
                 cursor = Some(c);
             }
             // A floating pane is always bordered, and its title sits on that
@@ -522,12 +524,14 @@ pub(super) fn patch_terminal_damage(
     Ok(())
 }
 
+/// Draw one pane into `area`. `content` is its terminal area, computed by the
+/// caller because a floating pane uses a smaller minimum than a tiled one.
 fn draw_one_pane(
     f: &mut RenderTarget,
     area: Rect,
+    content: Option<Rect>,
     id: PaneId,
     focused: bool,
-    bordered: bool,
     context: &mut PaneRenderContext<'_>,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
@@ -535,7 +539,7 @@ fn draw_one_pane(
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
     if let Some(view) = app.views.get(&id) {
-        let content = pane_content(area, bordered, app.compact, lone_header)?;
+        let content = content?;
         match view {
             crate::app::ViewKind::File(v) => {
                 let sel = app.selection.filter(|s| s.pane == id);
@@ -570,7 +574,7 @@ fn draw_one_pane(
     }
     let pane = app.panes.get(&id)?;
     let st = pane_state(app, id);
-    let content = pane_content(area, bordered, app.compact, lone_header)?;
+    let content = content?;
 
     // A lone pane has no border, so it shows a header bar on its top row.
     // Bordered panes instead get their dot+path+close as a title ON the top

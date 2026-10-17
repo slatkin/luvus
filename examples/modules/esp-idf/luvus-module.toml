@@ -54,9 +54,11 @@ type = "bool"
 default = true
 
 # ── Panes ────────────────────────────────────────────────────────────────────
-# menuconfig is a full-screen TUI, so it gets its own tab rather than taking
-# over the pane you invoked it from. This is the whole reason a terminal
-# multiplexer suits ESP-IDF: an editor plugin has to rebuild this as a webview.
+# menuconfig is a full-screen TUI intended as its own tab. The entry placement
+# only documents that intent: a direct open without `--placement tab` splits the
+# pane you invoked it from, while the menuconfig action below passes the flag.
+# This is the whole reason a terminal multiplexer suits ESP-IDF: an editor
+# plugin has to rebuild this as a webview.
 
 [[panes]]
 id = "partitions"

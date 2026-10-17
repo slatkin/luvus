@@ -463,7 +463,8 @@ command = ["bun", "run", "board.ts"]
 Open with `luvus module pane open <module-id> board`. It becomes a real luvus
 pane (a TUI, a log tail, anything), runs in the module root with the full
 `LUVUS_*` environment, and is auto-untracked on close. A module pane that's
-open when you detach is re-opened on the next launch.
+open when you detach is re-opened on the next launch. Without `--placement` it
+opens as a split, unless the entry placement is `floating` (see below).
 
 #### Floating panes and prompt dialogs
 
@@ -509,9 +510,11 @@ pane closes and focus returns to where the user was. Floating panes are not
 modal in input routing: the prefix key, its bindings and direct shortcuts keep
 working while the prompt is open.
 
-The manifest `placement` is used when `luvus module pane open` is called
-without `--placement`. A manifest placement that older luvus versions ignored
-now applies in that case; an explicit `--placement` still overrides it.
+A manifest entry `placement` applies without a flag only when it is `floating`.
+For a `tab`, `overlay`, `split` or other entry value, it only documents the
+intended placement: without a flag the pane opens as a split, as module panes
+did before floating panes. An explicit `--placement` (passed to
+`luvus module pane open`, or by an action) always wins.
 
 ### `[[docks]]`: a panel in the sidebar
 

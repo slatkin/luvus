@@ -34,7 +34,8 @@ luvus module link examples/modules/deck
 - **Right-click a node** in the WORKSPACES sidebar → **Present as slides**, or
 - `luvus module pane open example.deck present`
 
-It opens a **tab** with the deck. Navigate:
+It opens as a **split** unless you pass `--placement tab`, which gives the
+deck its own tab. Navigate:
 
 | keys | action |
 |------|--------|

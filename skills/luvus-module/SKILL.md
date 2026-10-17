@@ -112,7 +112,7 @@ y = 3
 command = ["sh", "prompt.sh"]
 ```
 
-`width` and `height` are the outer size including the border; omitted values default to half the tab width and a quarter of the tab height. Omitted `x`/`y` cascade from (4, 2) in steps of 4 and 2, restarting at 4 or 2 when the next position would pass the edge. Sizes below the 3x3 minimum are rejected before the command starts; larger sizes are clamped to the pane area. The entry `title` is the top border. Floating placement works only on tabs that hold panes (not Git, ORCH or Mission Control tabs). The manifest `placement` applies when `luvus module pane open` gets no `--placement` (older luvus ignored it in that case); an explicit `--placement` overrides it.
+`width` and `height` are the outer size including the border; omitted values default to half the tab width and a quarter of the tab height. Omitted `x`/`y` cascade from (4, 2) in steps of 4 and 2, restarting at 4 or 2 when the next position would pass the edge. Sizes below the 3x3 minimum are rejected before the command starts; larger sizes are clamped to the pane area. The entry `title` is the top border. Floating placement works only on tabs that hold panes (not Git, ORCH or Mission Control tabs). A manifest entry `placement` applies without a flag only when it is `floating`; a `tab`, `overlay`, `split` or other value only documents the intended placement, and the pane opens as a split as before. An explicit `--placement` always wins.
 
 ## Test loop
 

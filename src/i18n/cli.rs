@@ -1499,6 +1499,83 @@ static HELP: &[Translation] = &[
         "패널 분할 (기본값: 크기에 따라 자동 분할, 비어 있으면 작업 공간 생성)"
     ),
     tr!(
+        "open a floating pane above the tab",
+        "abrir un panel flotante sobre la pestaña",
+        "abrir um painel flutuante sobre a aba",
+        "ouvrir un volet flottant au-dessus de l'onglet",
+        "schwebenden Bereich über dem Tab öffnen",
+        "buka panel mengambang di atas tab",
+        "在标签页上方打开浮动窗格",
+        "タブの上にフローティングペインを開く",
+        "탭 위에 플로팅 패널 열기"
+    ),
+    tr!(
+        "defaults to the shell; everything after -- is the command argv",
+        "usa el shell por defecto; todo lo que sigue a -- es el argv del comando",
+        "usa o shell por padrão; tudo após -- é o argv do comando",
+        "utilise le shell par défaut ; tout ce qui suit -- est l’argv de la commande",
+        "verwendet standardmäßig die Shell; alles nach -- ist die Befehls-argv",
+        "memakai shell bawaan; semua setelah -- adalah argv perintah",
+        "默认使用 shell；-- 之后的所有内容都是命令参数",
+        "既定ではシェルを使用し、-- 以降はすべてコマンド引数です",
+        "기본적으로 셸을 사용하며 -- 뒤의 모든 내용은 명령 인자입니다"
+    ),
+    tr!(
+        "may be passed only once",
+        "solo puede especificarse una vez",
+        "só pode ser especificado uma vez",
+        "ne peut être spécifié qu'une seule fois",
+        "darf nur einmal angegeben werden",
+        "hanya boleh diberikan sekali",
+        "只能指定一次",
+        "は一度だけ指定できます",
+        "는 한 번만 지정할 수 있습니다"
+    ),
+    tr!(
+        "requires a value",
+        "requiere un valor",
+        "requer um valor",
+        "exige une valeur",
+        "erfordert einen Wert",
+        "memerlukan nilai",
+        "需要一个值",
+        "には値が必要です",
+        "에는 값이 필요합니다"
+    ),
+    tr!(
+        "must be a whole number from 3 to 65535",
+        "debe ser un número entero de 3 a 65535",
+        "deve ser um número inteiro de 3 a 65535",
+        "doit être un nombre entier de 3 à 65535",
+        "muss eine ganze Zahl von 3 bis 65535 sein",
+        "harus berupa bilangan bulat 3 hingga 65535",
+        "必须是 3 到 65535 之间的整数",
+        "は 3 から 65535 までの整数で指定してください",
+        "는 3에서 65535 사이의 정수여야 합니다"
+    ),
+    tr!(
+        "must be a whole number from 0 to 65535",
+        "debe ser un número entero de 0 a 65535",
+        "deve ser um número inteiro de 0 a 65535",
+        "doit être un nombre entier de 0 à 65535",
+        "muss eine ganze Zahl von 0 bis 65535 sein",
+        "harus berupa bilangan bulat 0 hingga 65535",
+        "必须是 0 到 65535 之间的整数",
+        "は 0 から 65535 までの整数で指定してください",
+        "는 0에서 65535 사이의 정수여야 합니다"
+    ),
+    tr!(
+        "is an unknown pane float option",
+        "es una opción desconocida de pane float",
+        "é uma opção desconhecida de pane float",
+        "est une option pane float inconnue",
+        "ist eine unbekannte pane-float-Option",
+        "adalah opsi pane float yang tidak dikenal",
+        "是未知的 pane float 选项",
+        "は不明な pane float オプションです",
+        "는 알 수 없는 pane float 옵션입니다"
+    ),
+    tr!(
         "transpose the nearest split without changing focus",
         "transponer la división más cercana sin cambiar el foco",
         "transpor a divisão mais próxima sem mudar o foco",
@@ -2998,6 +3075,39 @@ static TEXT: &[Translation] = &[
         "--cwd 必须是有效的 UTF-8",
         "--cwd は有効な UTF-8 である必要があります",
         "--cwd는 유효한 UTF-8이어야 합니다"
+    ),
+    tr!(
+        "pane id must be one numeric value",
+        "el id del panel debe ser un valor numérico",
+        "o id do painel deve ser um valor numérico",
+        "l'id du volet doit être une valeur numérique",
+        "die Bereichs-ID muss ein numerischer Wert sein",
+        "id panel harus berupa satu nilai angka",
+        "窗格 id 必须是一个数字值",
+        "ペイン id は数値 1 つで指定してください",
+        "패널 id는 숫자 하나여야 합니다"
+    ),
+    tr!(
+        "-- requires at least one command argument",
+        "-- requiere al menos un argumento de comando",
+        "-- requer pelo menos um argumento de comando",
+        "-- exige au moins un argument de commande",
+        "-- erfordert mindestens ein Befehlsargument",
+        "-- memerlukan setidaknya satu argumen perintah",
+        "-- 后需要至少一个命令参数",
+        "-- の後にコマンド引数が 1 つ以上必要です",
+        "-- 뒤에 명령 인자가 하나 이상 필요합니다"
+    ),
+    tr!(
+        "command arguments must not be empty",
+        "los argumentos del comando no pueden estar vacíos",
+        "os argumentos do comando não podem estar vazios",
+        "les arguments de commande ne peuvent pas être vides",
+        "Befehlsargumente dürfen nicht leer sein",
+        "argumen perintah tidak boleh kosong",
+        "命令参数不能为空",
+        "コマンド引数を空にはできません",
+        "명령 인자는 비어 있을 수 없습니다"
     ),
     tr!(
         "exact search query must be at most 4096 bytes",

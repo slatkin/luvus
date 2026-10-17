@@ -146,6 +146,8 @@ panes / agents:
   pane list [--all-tabs]     list panes across every workspace and tab
   pane list --current-tab    list panes and read-only history metrics in the current tab
   pane split [<id>] [--auto|--right|--down] [--no-focus] [--cwd <path>]   split a pane (default: auto by size, creates a workspace if empty)
+  pane float [<id>] [--width N] [--height N] [--x N] [--y N] [--title T] [--no-focus] [-- <cmd...>]   open a floating pane above the tab
+                             defaults to the shell; everything after -- is the command argv
   pane transpose [<id>]     transpose the nearest split without changing focus
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
@@ -609,7 +611,14 @@ fn command_help_request(args: &[String]) -> Option<(&str, Option<&str>)> {
 
 fn trailing_help_is_pass_through_payload(args: &[String], topic: &str) -> bool {
     match topic {
-        "pane" => matches!(args.get(2).map(String::as_str), Some("run" | "send")),
+        "pane" => {
+            matches!(args.get(2).map(String::as_str), Some("run" | "send"))
+                || (args.get(2).map(String::as_str) == Some("float")
+                    && args
+                        .iter()
+                        .position(|arg| arg == "--")
+                        .is_some_and(|index| index + 1 < args.len()))
+        }
         "agent" => matches!(
             args.get(2).map(String::as_str),
             Some("prompt" | "send" | "keys")
@@ -3430,6 +3439,84 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("pane.split".into(), with_pane(obj))
         }
+        ("pane", "float") => {
+            let separator = rest.iter().position(|arg| arg == "--");
+            let (options, command) = match separator {
+                Some(index) => (&rest[..index], Some(&rest[index + 1..])),
+                None => (rest, None),
+            };
+            let mut obj = serde_json::Map::new();
+            let mut pane_id: Option<String> = None;
+            let mut index = 0;
+            while index < options.len() {
+                match options[index].as_str() {
+                    "--no-focus" => {
+                        if obj.contains_key("focus") {
+                            return Err(anyhow!("--no-focus may be passed only once"));
+                        }
+                        obj.insert("focus".to_string(), json!(false));
+                        index += 1;
+                    }
+                    "--width" | "--height" | "--x" | "--y" | "--title" => {
+                        let flag = options[index].clone();
+                        let key = flag.trim_start_matches("--").to_string();
+                        let raw = options
+                            .get(index + 1)
+                            .ok_or_else(|| anyhow!("{flag} requires a value"))?;
+                        if obj.contains_key(&key) {
+                            return Err(anyhow!("{flag} may be passed only once"));
+                        }
+                        let value = if key == "title" {
+                            if raw.is_empty() || raw.starts_with("--") {
+                                return Err(anyhow!("{flag} requires a value"));
+                            }
+                            json!(raw)
+                        } else {
+                            let number = raw.parse::<u16>().map_err(|_| {
+                                if matches!(key.as_str(), "width" | "height") {
+                                    anyhow!("{flag} must be a whole number from 3 to 65535")
+                                } else {
+                                    anyhow!("{flag} must be a whole number from 0 to 65535")
+                                }
+                            })?;
+                            if matches!(key.as_str(), "width" | "height")
+                                && number < crate::layout::MIN_FLOATING
+                            {
+                                return Err(anyhow!(
+                                    "{flag} must be a whole number from 3 to 65535"
+                                ));
+                            }
+                            json!(number)
+                        };
+                        obj.insert(key, value);
+                        index += 2;
+                    }
+                    flag if flag.starts_with("--") => {
+                        return Err(anyhow!("{flag} is an unknown pane float option"));
+                    }
+                    raw => {
+                        if pane_id.is_some() || raw.parse::<u32>().is_err() {
+                            return Err(anyhow!("pane id must be one numeric value"));
+                        }
+                        pane_id = Some(raw.to_string());
+                        index += 1;
+                    }
+                }
+            }
+            if let Some(command) = command {
+                if command.is_empty() {
+                    return Err(anyhow!("-- requires at least one command argument"));
+                }
+                if command.iter().any(String::is_empty) {
+                    return Err(anyhow!("command arguments must not be empty"));
+                }
+                obj.insert("command".to_string(), json!(command));
+            }
+            if let Some(pane) = pane_id.or_else(|| std::env::var("LUVUS_PANE_ID").ok()) {
+                obj.insert("pane".to_string(), json!(pane));
+            }
+            ("pane.float".into(), Value::Object(obj))
+        }
         ("pane", "transpose") => {
             if rest.len() > 1 || rest.first().is_some_and(|id| id.parse::<u32>().is_err()) {
                 return Err(anyhow!("usage: luvus pane transpose [<id>]"));
@@ -4802,6 +4889,8 @@ mod tests {
             "luvus pane run 9 cargo -h",
             "luvus pane send 9 --help",
             "luvus pane send 9 -h",
+            "luvus pane float -- --help",
+            "luvus pane float 9 -- htop -h",
             "luvus agent send reviewer --help",
             "luvus agent send reviewer -h",
             "luvus agent prompt reviewer --help",
@@ -5249,6 +5338,199 @@ mod tests {
             parse(&argv(&long)).is_err(),
             "41-character name is rejected"
         );
+    }
+
+    #[test]
+    fn pane_float_parser_covers_every_flag_and_pass_through() {
+        std::env::remove_var("LUVUS_PANE_ID");
+        let (method, params) = parse(&argv(
+            "luvus pane float 7 --width 50 --height 12 --x 10 --y 3 --title Review --no-focus",
+        ))
+        .unwrap();
+        assert_eq!(method, "pane.float");
+        assert_eq!(
+            params,
+            json!({
+                "pane": "7",
+                "width": 50,
+                "height": 12,
+                "x": 10,
+                "y": 3,
+                "title": "Review",
+                "focus": false,
+            })
+        );
+
+        let (method, params) = parse(&argv("luvus pane float")).unwrap();
+        assert_eq!(method, "pane.float");
+        assert_eq!(params, json!({}));
+
+        let (_, params) =
+            parse(&argv("luvus pane float --x 0 --y 0 --width 3 --height 3")).unwrap();
+        assert_eq!(params["x"], 0);
+        assert_eq!(params["y"], 0);
+        assert_eq!(params["width"], 3);
+        assert_eq!(params["height"], 3);
+
+        let (_, params) = parse(&argv("luvus pane float 7 -- --width 9 --no-focus -h")).unwrap();
+        assert_eq!(params["pane"], "7");
+        assert_eq!(
+            params["command"],
+            json!(["--width", "9", "--no-focus", "-h"])
+        );
+        assert!(params.get("focus").is_none());
+        assert!(params.get("width").is_none());
+
+        let args = vec![
+            "luvus".to_string(),
+            "pane".to_string(),
+            "float".to_string(),
+            "--title".to_string(),
+            "Pick a branch".to_string(),
+            "--".to_string(),
+            "vim".to_string(),
+            "--".to_string(),
+            "note".to_string(),
+        ];
+        let (_, params) = parse(&args).unwrap();
+        assert_eq!(params["title"], "Pick a branch");
+        assert_eq!(params["command"], json!(["vim", "--", "note"]));
+    }
+
+    #[test]
+    fn pane_float_rejects_duplicate_invalid_and_unknown_options() {
+        std::env::remove_var("LUVUS_PANE_ID");
+        for command in [
+            "luvus pane float 7 8",
+            "luvus pane float worker",
+            "luvus pane float --width",
+            "luvus pane float --width 2",
+            "luvus pane float --width two",
+            "luvus pane float --width -1",
+            "luvus pane float --height 0",
+            "luvus pane float --height 2",
+            "luvus pane float --x -1",
+            "luvus pane float --y nope",
+            "luvus pane float --title",
+            "luvus pane float --title --width",
+            "luvus pane float --width 10 --width 11",
+            "luvus pane float --title one --title two",
+            "luvus pane float --no-focus --no-focus",
+            "luvus pane float --focus",
+            "luvus pane float --bogus",
+            "luvus pane float --",
+        ] {
+            assert!(parse(&argv(command)).is_err(), "{command} must be rejected");
+        }
+        assert_eq!(
+            parse(&argv("luvus pane float --width 10 --width 11"))
+                .unwrap_err()
+                .to_string(),
+            "--width may be passed only once"
+        );
+        assert_eq!(
+            parse(&argv("luvus pane float --height 2"))
+                .unwrap_err()
+                .to_string(),
+            "--height must be a whole number from 3 to 65535"
+        );
+        assert_eq!(
+            parse(&argv("luvus pane float --x -1"))
+                .unwrap_err()
+                .to_string(),
+            "--x must be a whole number from 0 to 65535"
+        );
+        let empty_argument = vec![
+            "luvus".to_string(),
+            "pane".to_string(),
+            "float".to_string(),
+            "--".to_string(),
+            String::new(),
+        ];
+        assert_eq!(
+            parse(&empty_argument).unwrap_err().to_string(),
+            "command arguments must not be empty"
+        );
+    }
+
+    #[test]
+    fn pane_float_help_is_focused_and_localized() {
+        let focused = rendered_topic_help("pane", Some("float"));
+        assert!(focused.contains(
+            "pane float [<id>] [--width N] [--height N] [--x N] [--y N] [--title T] [--no-focus] [-- <cmd...>]"
+        ));
+        assert!(focused.contains("open a floating pane above the tab"));
+        assert!(focused.contains("everything after -- is the command argv"));
+        assert!(!focused.contains("pane split"));
+        assert!(!focused.contains("pane transpose"));
+        assert!(!focused.contains("pane list"));
+
+        for language in [
+            crate::i18n::cli::Language::Es,
+            crate::i18n::cli::Language::Pt,
+            crate::i18n::cli::Language::Fr,
+            crate::i18n::cli::Language::De,
+            crate::i18n::cli::Language::Id,
+            crate::i18n::cli::Language::Zh,
+            crate::i18n::cli::Language::Ja,
+            crate::i18n::cli::Language::Ko,
+        ] {
+            let mut output = Vec::new();
+            assert!(write_topic_help(&mut output, "pane", Some("float"), language).unwrap());
+            let localized = String::from_utf8(output).unwrap();
+            assert!(localized.contains("pane float [<id>]"), "{language:?}");
+            assert!(localized.contains("--no-focus"), "{language:?}");
+            assert!(
+                !localized.contains("open a floating pane above the tab"),
+                "{language:?} kept English prose"
+            );
+            assert!(
+                !localized.contains("everything after -- is the command argv"),
+                "{language:?} kept English prose"
+            );
+
+            let complete = crate::i18n::cli::help(DETAILED_USAGE, language).into_owned();
+            assert!(
+                !complete.contains("open a floating pane above the tab"),
+                "{language:?} kept English compact prose"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_float_diagnostics_localize_with_canonical_flags() {
+        let cases = [
+            ("--width may be passed only once", "--width"),
+            ("--title requires a value", "--title"),
+            (
+                "--height must be a whole number from 3 to 65535",
+                "--height",
+            ),
+            ("--x must be a whole number from 0 to 65535", "--x"),
+            ("--bogus is an unknown pane float option", "--bogus"),
+            ("pane id must be one numeric value", "id"),
+            ("-- requires at least one command argument", "--"),
+            ("command arguments must not be empty", ""),
+        ];
+        for (source, canonical) in cases {
+            for language in [
+                crate::i18n::cli::Language::Es,
+                crate::i18n::cli::Language::Pt,
+                crate::i18n::cli::Language::Fr,
+                crate::i18n::cli::Language::De,
+                crate::i18n::cli::Language::Id,
+                crate::i18n::cli::Language::Zh,
+                crate::i18n::cli::Language::Ja,
+                crate::i18n::cli::Language::Ko,
+            ] {
+                let translated = crate::i18n::cli::diagnostic(source, language);
+                assert_ne!(translated, source, "{language:?} kept `{source}`");
+                assert!(
+                    translated.to_lowercase().contains(canonical),
+                    "{language:?} lost `{canonical}`: {translated}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -655,8 +655,8 @@ impl App {
     }
 
     /// Place a freshly spawned module pane per its entry's placement. A floating
-    /// pane takes focus and shows the entry title; a failed attach must not leak
-    /// the spawned PTY.
+    /// pane takes focus and shows the entry title; its target and geometry were
+    /// validated before the spawn, so the attach cannot fail.
     fn place_module_pane(
         &mut self,
         id: PaneId,
@@ -680,25 +680,14 @@ impl App {
                 let Some((workspace, tab, geometry)) = floating else {
                     return Err(format!("module {module_id} has no floating geometry"));
                 };
-                if let Err(error) = self.attach_floating(
+                self.attach_floating(
                     id,
                     workspace,
                     tab,
                     geometry.rect,
                     Some(entry.title.clone()),
                     true,
-                ) {
-                    self.close_pane(id);
-                    let reason = match error {
-                        FloatingPaneError::PaneNotFound => "the target tab is gone",
-                        FloatingPaneError::TargetNotPaneTab => {
-                            "the target tab cannot hold a floating pane"
-                        }
-                        FloatingPaneError::InvalidGeometry => "invalid floating pane geometry",
-                        FloatingPaneError::SpawnFailed => "the pane could not be attached",
-                    };
-                    return Err(format!("cannot open floating module pane: {reason}"));
-                }
+                );
                 self.workspaces[workspace].tabs[tab].floating.last_cascade = Some(geometry.cascade);
             }
             _ => {

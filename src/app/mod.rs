@@ -5915,11 +5915,16 @@ impl App {
 
     /// Attach an already spawned pane as a floating pane of `workspace`/`tab`.
     ///
-    /// The geometry is the stored outer rect in pane-area cells. A create path
-    /// validates the tab kind and geometry before it spawns, so this cannot
-    /// leave an orphan PTY. Attaching always leaves the new pane on top and
-    /// clears zoom; `focus` additionally moves focus to it and records the
-    /// previous focus in history.
+    /// The geometry is the stored outer rect in pane-area cells. Callers MUST
+    /// validate the target tab and the geometry before they spawn, as
+    /// `float_pane` and the module pane path do; the pane id must be freshly
+    /// allocated and absent from the layout. This cannot fail after the PTY
+    /// exists, so those conditions are debug-only tripwires: a violation panics
+    /// in debug builds and is a no-op-ish attach in release builds, matching the
+    /// A7 convention for impossible attach states.
+    ///
+    /// Attaching always leaves the new pane on top and clears zoom; `focus`
+    /// additionally moves focus to it and records the previous focus in history.
     pub(crate) fn attach_floating(
         &mut self,
         pane_id: PaneId,
@@ -5928,15 +5933,22 @@ impl App {
         geometry: Rect,
         title: Option<String>,
         focus: bool,
-    ) -> Result<(), FloatingPaneError> {
-        self.validate_floating_target(workspace, tab)?;
-        if !crate::layout::floating_size_valid(geometry.width, geometry.height) {
-            return Err(FloatingPaneError::InvalidGeometry);
-        }
+    ) {
+        debug_assert!(
+            self.validate_floating_target(workspace, tab).is_ok(),
+            "attach_floating target must be validated before the spawn"
+        );
+        debug_assert!(
+            crate::layout::floating_size_valid(geometry.width, geometry.height),
+            "attach_floating geometry must be validated before the spawn"
+        );
+        debug_assert!(
+            !self.workspaces[workspace].tabs[tab]
+                .layout
+                .contains(pane_id),
+            "attach_floating pane must be freshly spawned"
+        );
         let layout = &mut self.workspaces[workspace].tabs[tab].layout;
-        if layout.contains(pane_id) {
-            return Err(FloatingPaneError::InvalidGeometry);
-        }
         layout.add_floating(pane_id, geometry);
         if let Some(title) = title {
             self.workspaces[workspace].tabs[tab]
@@ -5950,7 +5962,6 @@ impl App {
         if focus {
             self.focus_location(workspace, tab, pane_id);
         }
-        Ok(())
     }
 
     /// Clamp every stored floating rect of the active tab into `area`, given in
@@ -6035,17 +6046,14 @@ impl App {
                 .ok_or(FloatingPaneError::SpawnFailed)?,
         };
 
-        if let Err(error) = self.attach_floating(
+        self.attach_floating(
             pane_id,
             workspace,
             tab,
             geometry.rect,
             request.title,
             request.focus,
-        ) {
-            self.close_pane(pane_id);
-            return Err(error);
-        }
+        );
         self.workspaces[workspace].tabs[tab].floating.last_cascade = Some(geometry.cascade);
         Ok(FloatingPaneResult {
             pane: pane_id,

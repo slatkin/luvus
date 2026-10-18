@@ -5759,11 +5759,7 @@ impl App {
                 let layout = &self.workspaces[workspace].tabs[tab].layout;
                 // Floating panes have no tree rect, so an automatic split sizes
                 // the tile it will actually divide.
-                let pane = if layout.is_floating(pane) {
-                    layout.tiled_focus
-                } else {
-                    pane
-                };
+                let pane = layout.tiled_anchor(pane);
                 layout.pane_rect(area, pane)
             })
             .unwrap_or(area);

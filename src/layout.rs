@@ -340,13 +340,21 @@ impl TileLayout {
         contains_leaf(&self.root, id) || self.is_floating(id)
     }
 
-    /// The tree leaf that a tree-only operation acts on.
-    fn tree_focus(&self) -> PaneId {
-        if self.is_floating(self.focus) {
+    /// The tree-only anchor a tree operation acts on for any pane id: a
+    /// floating pane answers from `tiled_focus`, because it has no tree leaf.
+    /// A tiled or unknown id is returned unchanged, so callers that already
+    /// validated the pane keep their own error handling.
+    pub fn tiled_anchor(&self, pane: PaneId) -> PaneId {
+        if self.is_floating(pane) {
             self.tiled_focus
         } else {
-            self.focus
+            pane
         }
+    }
+
+    /// The tree leaf that a tree-only operation acts on.
+    fn tree_focus(&self) -> PaneId {
+        self.tiled_anchor(self.focus)
     }
 
     /// Tiled pane geometry within `area`. Floating panes have stored rects
@@ -422,11 +430,7 @@ impl TileLayout {
     /// uses exactly the same geometric rule as the TUI. A floating pane answers
     /// from the tab's last focused tiled pane.
     pub fn neighbor(&self, area: Rect, pane: PaneId, dir: Dir) -> Option<PaneId> {
-        let from = if self.is_floating(pane) {
-            self.tiled_focus
-        } else {
-            pane
-        };
+        let from = self.tiled_anchor(pane);
         self.find_in_direction_from(area, from, dir)
     }
 
@@ -472,11 +476,7 @@ impl TileLayout {
     /// A floating pane maps to the last focused tiled pane; the dispatch layer
     /// rejects floating targets before this call.
     pub fn transpose_pane(&mut self, pane: PaneId) -> bool {
-        let pane = if self.is_floating(pane) {
-            self.tiled_focus
-        } else {
-            pane
-        };
+        let pane = self.tiled_anchor(pane);
         let mut path = Vec::new();
         if !path_to_leaf(&self.root, pane, &mut path) || path.is_empty() {
             return false;
@@ -1555,6 +1555,30 @@ mod tests {
         assert_ne!(
             tiled, floating_rect,
             "a floating pane never reports tree geometry"
+        );
+    }
+
+    #[test]
+    fn tiled_anchor_resolves_floating_panes_to_tiled_focus() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let floating = PaneId::alloc();
+        layout.add_floating(floating, Rect::new(4, 2, 20, 8));
+        layout.set_focus(floating);
+        let unknown = PaneId(999);
+
+        assert_eq!(layout.tiled_anchor(a), a, "a tiled pane is its own anchor");
+        assert_eq!(
+            layout.tiled_anchor(floating),
+            b,
+            "a floating pane answers from the last focused tiled pane"
+        );
+        assert_eq!(
+            layout.tiled_anchor(unknown),
+            unknown,
+            "an unknown id is returned unchanged"
         );
     }
 

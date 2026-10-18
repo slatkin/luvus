@@ -54,11 +54,7 @@ impl App {
             let layout = &self.workspaces[workspace].tabs[tab].layout;
             // A floating pane has no tree rect; its edges answer for the last
             // focused tiled pane, as `pane.neighbor` does.
-            let query = if layout.is_floating(pane) {
-                layout.tiled_focus
-            } else {
-                pane
-            };
+            let query = layout.tiled_anchor(pane);
             let rect = layout.pane_rect(area, query).ok_or_else(not_found)?;
             Ok(
                 json!({"type":"pane_edges","pane":pane.0.to_string(),"edges":{

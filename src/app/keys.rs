@@ -254,6 +254,20 @@ impl Cmd {
         }
     }
 
+    /// Commands that act on the tiled tree. A floating pane has no tree
+    /// geometry, so these are rejected with a notice instead of acting on
+    /// the tile behind it.
+    pub fn requires_tiled(self) -> bool {
+        matches!(
+            self,
+            Cmd::SplitRight
+                | Cmd::SplitDown
+                | Cmd::SplitAuto
+                | Cmd::TransposePane
+                | Cmd::ResizeMode
+        )
+    }
+
     /// Human label shown in the Keys list / cheat-sheet, in the active language
     /// (docs/21). `id()` stays the stable English key; only this display label
     /// is localized.
@@ -960,28 +974,11 @@ impl App {
         true
     }
 
-    /// Split, transpose and resize act on the tiled tree. A floating pane has no
-    /// tree geometry, so these show a notice instead of acting on the last
-    /// focused tile behind the user's back.
-    fn floating_pane_blocks_tiled_command(&self, cmd: Cmd) -> bool {
-        matches!(
-            cmd,
-            Cmd::SplitRight
-                | Cmd::SplitDown
-                | Cmd::SplitAuto
-                | Cmd::TransposePane
-                | Cmd::ResizeMode
-        ) && self
-            .workspaces
-            .get(self.active_ws)
-            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
-            .is_some_and(|tab| tab.layout.is_floating(tab.layout.focus))
-    }
-
     /// Run a prefix command.
     pub fn run_cmd(&mut self, cmd: Cmd) {
-        if self.floating_pane_blocks_tiled_command(cmd) {
-            self.show_toast(self.catalog.floating_tiled_only);
+        // Tiled-only commands explain the rejection instead of quietly
+        // editing the tile behind a floating pane.
+        if cmd.requires_tiled() && self.reject_tiled_only_floating(self.layout().focus) {
             return;
         }
         match cmd {

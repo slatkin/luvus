@@ -191,9 +191,7 @@ impl App {
                 None | Some(Value::Null) => self.layout().focus,
                 Some(_) => self.resolve_pane(p)?.ok_or_else(not_found)?,
             };
-            if self.is_floating_pane(base) {
-                return Err(floating_pane_rejection());
-            }
+            self.require_tiled_api(base)?;
             let axis = split_axis(self, p, base)?;
             let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
             let new = self
@@ -1417,9 +1415,7 @@ impl App {
         {
             reject_api_fields(p, &["pane", "direction", "cells"])?;
             let pane = self.resolve_pane_or_focus(p)?;
-            if self.is_floating_pane(pane) {
-                return Err(floating_pane_rejection());
-            }
+            self.require_tiled_api(pane)?;
             let direction = crate::api::topology::direction(p)?;
             let cells = p.get("cells").and_then(Value::as_i64).unwrap_or(1);
             if !(1..=1000).contains(&cells) {
@@ -1520,9 +1516,7 @@ impl App {
                 .ok_or_else(not_found)?,
             Some(value) => PaneId(parse_u32_value(value, "pane")?),
         };
-        if self.is_floating_pane(pane) {
-            return Err(floating_pane_rejection());
-        }
+        self.require_tiled_api(pane)?;
         let changed = self.transpose_pane(pane).ok_or_else(not_found)?;
         Ok(json!({"type":"pane_transpose","pane":pane.0.to_string(),"changed":changed}))
     }
@@ -1541,9 +1535,8 @@ impl App {
                 })?,
                 "with",
             )?);
-            if self.is_floating_pane(first) || self.is_floating_pane(second) {
-                return Err(floating_pane_rejection());
-            }
+            self.require_tiled_api(first)?;
+            self.require_tiled_api(second)?;
             let first_location = self.pane_location(first).ok_or_else(not_found)?;
             let second_location = self.pane_location(second).ok_or_else(not_found)?;
             if first_location != second_location {
@@ -1582,6 +1575,19 @@ impl App {
 }
 
 impl App {
+    /// Tiled-only API guard: split, transpose, swap and resize act on the
+    /// tiled tree, so a floating target gets the shared rejection instead of
+    /// editing the tile behind it.
+    pub(in crate::app::dispatch) fn require_tiled_api(
+        &self,
+        pane: PaneId,
+    ) -> Result<(), (String, String)> {
+        if self.is_floating_pane(pane) {
+            return Err(floating_pane_rejection());
+        }
+        Ok(())
+    }
+
     pub(in crate::app::dispatch) fn resolve_optional_pane(
         &self,
         p: &Value,

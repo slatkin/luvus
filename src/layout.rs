@@ -282,6 +282,15 @@ impl TileLayout {
         self.floating.iter().rev().copied().collect()
     }
 
+    /// Stored rect of one floating pane, without allocating the full list.
+    /// Tiled and unknown IDs return `None`.
+    pub fn floating_rect(&self, id: PaneId) -> Option<Rect> {
+        self.floating
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .map(|(_, rect)| *rect)
+    }
+
     /// Whether `id` is a floating pane.
     pub fn is_floating(&self, id: PaneId) -> bool {
         self.floating.iter().any(|(pane, _)| *pane == id)
@@ -416,6 +425,14 @@ impl TileLayout {
             .into_iter()
             .find(|candidate| candidate.id == pane)
             .map(|candidate| candidate.rect)
+    }
+
+    /// Geometry for any pane in the tab: the stored rect for a floating pane,
+    /// tree geometry for a tiled one. Callers that accept both kinds of pane
+    /// should use this instead of branching on [`Self::is_floating`].
+    pub fn pane_rect_any(&self, area: Rect, pane: PaneId) -> Option<Rect> {
+        self.floating_rect(pane)
+            .or_else(|| self.pane_rect(area, pane))
     }
 
     /// Swap two leaf identities without moving or recreating either PTY.
@@ -1465,6 +1482,43 @@ mod tests {
             layout.floating_rects(),
             before,
             "tiled and unknown IDs are ignored"
+        );
+    }
+
+    #[test]
+    fn pane_rect_any_resolves_tiled_and_floating_geometry() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let floating = PaneId::alloc();
+        let floating_rect = Rect::new(4, 2, 20, 8);
+        layout.add_floating(floating, floating_rect);
+        let area = Rect::new(0, 0, 80, 24);
+
+        assert_eq!(layout.floating_rect(floating), Some(floating_rect));
+        assert_eq!(layout.floating_rect(a), None, "tiled panes are not floats");
+        assert_eq!(layout.floating_rect(PaneId(999)), None);
+
+        let tiled = layout
+            .panes(area)
+            .into_iter()
+            .find(|pane| pane.id == a)
+            .expect("the tiled leaf stays in the tree")
+            .rect;
+        assert_eq!(
+            layout.pane_rect_any(area, a),
+            Some(tiled),
+            "tiled panes keep tree geometry"
+        );
+        assert_eq!(
+            layout.pane_rect_any(area, floating),
+            Some(floating_rect),
+            "floating panes keep their stored rect"
+        );
+        assert_ne!(
+            tiled, floating_rect,
+            "a floating pane never reports tree geometry"
         );
     }
 

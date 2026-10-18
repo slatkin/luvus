@@ -1829,19 +1829,12 @@ impl App {
         let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
         let area = crate::api::topology::logical_area();
         let layout = &self.workspaces[workspace].tabs[tab].layout;
-        // A floating pane has a stored rect instead of tree geometry, and the
-        // tree always stays tiled-only.
+        // A floating pane reports its stored rect instead of tree geometry.
+        // The reported tree stays tiled-only by design: persistence and
+        // apply_tree require a tiled-only tree, so popups never enter it (see
+        // creating_a_floating_pane_keeps_the_tiled_layout_and_takes_focus).
         let floating = layout.is_floating(pane);
-        let rect = if floating {
-            layout
-                .floating_rects()
-                .into_iter()
-                .find(|(id, _)| *id == pane)
-                .map(|(_, rect)| rect)
-                .ok_or_else(not_found)?
-        } else {
-            layout.pane_rect(area, pane).ok_or_else(not_found)?
-        };
+        let rect = layout.pane_rect_any(area, pane).ok_or_else(not_found)?;
         let mut value = json!({
             "type":"pane_layout", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
             "tab":(tab+1).to_string(), "logical_size":{"width":area.width,"height":area.height},

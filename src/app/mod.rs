@@ -14110,6 +14110,22 @@ fi
         assert!(app.new_ws_rect.is_none(), "no synthetic action is rendered");
     }
 
+    /// Tiled-only prefix commands must be a silent no-op when no workspace
+    /// exists instead of indexing the missing active tab.
+    #[test]
+    fn tiled_only_prefix_commands_are_safe_without_a_workspace() {
+        let _env = crate::persist::test_env("tiled-command-no-workspace");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.server_mode = true;
+        force_empty_session(&mut app);
+
+        app.run_cmd(crate::app::Cmd::TransposePane);
+
+        assert!(app.workspaces.is_empty());
+        assert!(app.toast.is_none());
+    }
+
     #[test]
     fn closing_last_pane_opens_a_home_terminal_and_accepts_new_tab() {
         let _env = crate::persist::test_env("close-last-pane");

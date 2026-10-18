@@ -977,9 +977,19 @@ impl App {
     /// Run a prefix command.
     pub fn run_cmd(&mut self, cmd: Cmd) {
         // Tiled-only commands explain the rejection instead of quietly
-        // editing the tile behind a floating pane.
-        if cmd.requires_tiled() && self.reject_tiled_only_floating(self.layout().focus) {
-            return;
+        // editing the tile behind a floating pane. Focus resolves tolerantly:
+        // a server can stay alive with no workspace.
+        let focus = self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+            .map(|tab| tab.layout.focus);
+        if cmd.requires_tiled() {
+            if let Some(pane) = focus {
+                if self.reject_tiled_only_floating(pane) {
+                    return;
+                }
+            }
         }
         match cmd {
             Cmd::FocusLeft => self.focus_dir(Dir::Left),

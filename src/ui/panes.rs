@@ -1310,20 +1310,6 @@ mod tests {
         }
     }
 
-    fn floating_request(geometry: (u16, u16, u16, u16)) -> crate::app::FloatingPaneRequest {
-        let (x, y, width, height) = geometry;
-        crate::app::FloatingPaneRequest {
-            target: None,
-            width: Some(width),
-            height: Some(height),
-            x: Some(x),
-            y: Some(y),
-            title: None,
-            focus: true,
-            command: None,
-        }
-    }
-
     /// A floating pane's own output goes through the damage fast path: the patch
     /// reproduces exactly what a full render would draw.
     #[test]
@@ -1333,7 +1319,13 @@ mod tests {
         let mut app = App::new(100, 30, tx).expect("app starts");
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_request((10, 4, 40, 8)))
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 40, 8)),
+                None,
+                true,
+                None,
+            ))
             .expect("floating pane")
             .pane;
         let _tiled_engine = install_engine(&mut app, tiled, "tiled", 60, 20);
@@ -1395,7 +1387,13 @@ mod tests {
         let mut app = App::new(100, 30, tx).expect("app starts");
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_request((10, 4, 40, 8)))
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 40, 8)),
+                None,
+                true,
+                None,
+            ))
             .expect("floating pane")
             .pane;
         let tiled_engine = install_engine(&mut app, tiled, "tiled", 60, 20);
@@ -1487,11 +1485,23 @@ mod tests {
         let mut app = App::new(100, 30, tx).expect("app starts");
         let tiled = app.layout().focus;
         let lower = app
-            .float_pane(floating_request((10, 4, 40, 8)))
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 40, 8)),
+                None,
+                true,
+                None,
+            ))
             .expect("lower floating pane")
             .pane;
         let upper = app
-            .float_pane(floating_request((20, 6, 40, 8)))
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((20, 6, 40, 8)),
+                None,
+                true,
+                None,
+            ))
             .expect("upper floating pane")
             .pane;
         let _tiled_engine = install_engine(&mut app, tiled, "tiled", 60, 20);

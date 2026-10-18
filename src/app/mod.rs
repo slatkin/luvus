@@ -1123,6 +1123,36 @@ pub struct FloatingPaneRequest {
     pub command: Option<Vec<String>>,
 }
 
+#[cfg(test)]
+impl FloatingPaneRequest {
+    /// Build a request in tests. `geometry` is the outer `(x, y, width, height)`
+    /// in pane-area cells; `None` leaves size and position to the app defaults.
+    /// `focus` is explicit because the documented API default is `true`, which a
+    /// derived `Default` would silently flip.
+    pub(crate) fn test(
+        target: Option<PaneId>,
+        geometry: Option<(u16, u16, u16, u16)>,
+        title: Option<&str>,
+        focus: bool,
+        command: Option<Vec<String>>,
+    ) -> Self {
+        let (width, height, x, y) = match geometry {
+            Some((x, y, width, height)) => (Some(width), Some(height), Some(x), Some(y)),
+            None => (None, None, None, None),
+        };
+        Self {
+            target,
+            width,
+            height,
+            x,
+            y,
+            title: title.map(str::to_string),
+            focus,
+            command,
+        }
+    }
+}
+
 /// Where a new floating pane landed (internal zero-based indices).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FloatingPaneResult {
@@ -10648,40 +10678,6 @@ mod tests {
         .unwrap()
     }
 
-    /// A floating request with explicit outer geometry, in pane-area cells.
-    fn floating_geometry(
-        (x, y, width, height): (u16, u16, u16, u16),
-        focus: bool,
-    ) -> FloatingPaneRequest {
-        FloatingPaneRequest {
-            target: None,
-            width: Some(width),
-            height: Some(height),
-            x: Some(x),
-            y: Some(y),
-            title: None,
-            focus,
-            command: None,
-        }
-    }
-
-    fn floating_request(
-        target: Option<PaneId>,
-        command: Option<Vec<String>>,
-        focus: bool,
-    ) -> FloatingPaneRequest {
-        FloatingPaneRequest {
-            target,
-            width: None,
-            height: None,
-            x: None,
-            y: None,
-            title: None,
-            focus,
-            command,
-        }
-    }
-
     fn shell_command(app: &App) -> Vec<String> {
         vec![crate::platform::resolve_shell(&app.config.shell)]
     }
@@ -12248,7 +12244,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, None, false))
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
             .unwrap()
             .pane;
         let status = app.status.get_mut(&floating).expect("floating status");
@@ -12274,7 +12270,13 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, Some(shell_command(&app)), false))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                None,
+                None,
+                false,
+                Some(shell_command(&app)),
+            ))
             .unwrap()
             .pane;
         assert!(app.panes[&floating].terminal_runtime().is_some());
@@ -12309,7 +12311,7 @@ mod tests {
         // A floating pane in another workspace whose own cwd is under the
         // deletion target: its filesystem context disappears with the worktree.
         let foreign = app
-            .float_pane(floating_request(None, None, false))
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
             .unwrap()
             .pane;
         app.panes.get_mut(&foreign).unwrap().cwd = nested.clone();
@@ -12317,7 +12319,7 @@ mod tests {
         // still a pane of that workspace, so its terminal dies with the target.
         app.active_ws = 0;
         let anchored = app
-            .float_pane(floating_request(None, None, false))
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
             .unwrap()
             .pane;
         app.panes.get_mut(&anchored).unwrap().cwd = outside.clone();
@@ -12355,7 +12357,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, None, false))
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
             .unwrap()
             .pane;
         let sequence = crate::ipc::api::current_sequence(&app.events);
@@ -12386,7 +12388,7 @@ mod tests {
         app.workspaces[0].active_tab = 0;
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_request(None, None, false))
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
             .unwrap()
             .pane;
 
@@ -17439,7 +17441,7 @@ fi
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let tree = serde_json::to_vec(&app.layout().to_tree()).unwrap();
@@ -17723,7 +17725,7 @@ fi
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
 
@@ -17747,7 +17749,7 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let tree = serde_json::to_vec(&app.layout().to_tree()).unwrap();
@@ -20301,7 +20303,13 @@ fi
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, Some(shell_command(&app)), true))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                None,
+                None,
+                true,
+                Some(shell_command(&app)),
+            ))
             .expect("floating pane spawns")
             .pane;
         let cwd = app.panes[&floating].cwd.clone();
@@ -21909,11 +21917,11 @@ fi
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let a = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let b = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         assert_eq!(app.layout().floating_rects()[0].0, b, "new pane on top");
@@ -21930,7 +21938,7 @@ fi
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         app.run_cmd(crate::app::keys::Cmd::NewTab);
@@ -21949,7 +21957,7 @@ fi
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let floating = app
-            .float_pane(floating_request(None, None, false))
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
             .unwrap()
             .pane;
         app.zoomed = true;
@@ -21968,7 +21976,7 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         app.zoomed = true;
@@ -21990,11 +21998,11 @@ fi
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let first = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let second = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         app.focus_pane_global(first);
@@ -22030,7 +22038,13 @@ fi
         let before = app.panes.len();
 
         let result = app
-            .float_pane(floating_request(None, Some(shell_command(&app)), true))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                None,
+                None,
+                true,
+                Some(shell_command(&app)),
+            ))
             .unwrap();
 
         let tiled_after: Vec<(PaneId, Rect)> = app
@@ -22050,7 +22064,9 @@ fi
 
         // With no command the pane runs the default shell.
         let before = app.panes.len();
-        let shell = app.float_pane(floating_request(None, None, true)).unwrap();
+        let shell = app
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
+            .unwrap();
         assert_eq!(app.panes.len(), before + 1);
         assert!(app.panes.contains_key(&shell.pane));
         assert!(app.layout().is_floating(shell.pane));
@@ -22072,7 +22088,13 @@ fi
         app.workspaces[0].active_tab = 0;
 
         let result = app
-            .float_pane(floating_request(Some(target), None, true))
+            .float_pane(FloatingPaneRequest::test(
+                Some(target),
+                None,
+                None,
+                true,
+                None,
+            ))
             .unwrap();
 
         assert_eq!((result.workspace, result.tab), (1, 1));
@@ -22091,7 +22113,9 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         force_empty_session(&mut app);
 
-        let result = app.float_pane(floating_request(None, None, true)).unwrap();
+        let result = app
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
+            .unwrap();
 
         assert_eq!(app.workspaces.len(), 1);
         assert_eq!((result.workspace, result.tab), (0, 0));
@@ -22115,7 +22139,13 @@ fi
         let before = app.panes.len();
 
         let error = app
-            .float_pane(floating_request(Some(placeholder), None, true))
+            .float_pane(FloatingPaneRequest::test(
+                Some(placeholder),
+                None,
+                None,
+                true,
+                None,
+            ))
             .unwrap_err();
 
         assert_eq!(error, FloatingPaneError::TargetNotPaneTab);
@@ -22129,7 +22159,7 @@ fi
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let before = app.panes.len();
-        let mut request = floating_request(None, None, true);
+        let mut request = FloatingPaneRequest::test(None, None, None, true, None);
         request.width = Some(2);
 
         assert_eq!(
@@ -22147,7 +22177,9 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let tiled = app.layout().focus;
 
-        let result = app.float_pane(floating_request(None, None, false)).unwrap();
+        let result = app
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
+            .unwrap();
 
         assert_eq!(app.layout().focus, tiled);
         assert_eq!(app.layout().tiled_focus, tiled);
@@ -22161,7 +22193,9 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         app.zoomed = true;
 
-        let result = app.float_pane(floating_request(None, None, true)).unwrap();
+        let result = app
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
+            .unwrap();
 
         assert!(!app.zoomed);
         assert_eq!(app.layout().focus, result.pane);
@@ -22175,7 +22209,13 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_request(None, Some(shell_command(&app)), true))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                None,
+                None,
+                true,
+                Some(shell_command(&app)),
+            ))
             .unwrap()
             .pane;
         assert_eq!(app.layout().focus, floating);
@@ -22195,11 +22235,11 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let tiled = app.layout().focus;
         let previous = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let focused = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         app.close_pane(previous);
@@ -22214,7 +22254,7 @@ fi
 
         // With no live history the tab's last focused tiled pane wins.
         let last = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         app.focus_history_back.clear();
@@ -22229,7 +22269,7 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let leaves = app.layout().leaves();
         let floating = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
 
@@ -22247,7 +22287,7 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_request(None, None, false))
+            .float_pane(FloatingPaneRequest::test(None, None, None, false, None))
             .unwrap()
             .pane;
 
@@ -22263,11 +22303,11 @@ fi
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let first = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let second = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let second_rect = app.layout().floating_rects()[0].1;
@@ -22276,7 +22316,7 @@ fi
         app.close_pane(first);
         app.close_pane(second);
         let third = app
-            .float_pane(floating_request(None, None, true))
+            .float_pane(FloatingPaneRequest::test(None, None, None, true, None))
             .unwrap()
             .pane;
         let third_rect = app.layout().floating_rects()[0].1;
@@ -22313,9 +22353,12 @@ fi
 
         // Cover the seam with a floating pane, rows 0..10 of the pane area.
         let floating = app
-            .float_pane(floating_geometry(
-                (seam.saturating_sub(area.x).saturating_sub(5), 0, 20, 10),
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                Some((seam.saturating_sub(area.x).saturating_sub(5), 0, 20, 10)),
+                None,
                 false,
+                None,
             ))
             .unwrap()
             .pane;
@@ -22374,14 +22417,17 @@ fi
         // One floating pane covers both buttons on the tiled pane's top border.
         let left = close.x.min(zoom.x).saturating_sub(2);
         let floating = app
-            .float_pane(floating_geometry(
-                (
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                Some((
                     left.saturating_sub(area.x),
                     close.y.saturating_sub(area.y),
                     24,
                     8,
-                ),
+                )),
+                None,
                 false,
+                None,
             ))
             .unwrap()
             .pane;
@@ -22431,7 +22477,13 @@ fi
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_geometry((10, 4, 30, 8), true))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 30, 8)),
+                None,
+                true,
+                None,
+            ))
             .unwrap()
             .pane;
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -22486,7 +22538,13 @@ fi
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let floating = app
-            .float_pane(floating_geometry((10, 4, 30, 8), true))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 30, 8)),
+                None,
+                true,
+                None,
+            ))
             .unwrap()
             .pane;
         let stored = app.layout().floating_rects();
@@ -22529,7 +22587,13 @@ fi
         let mut app = App::new(80, 24, tx).unwrap();
         let tiled = app.layout().focus;
         let floating = app
-            .float_pane(floating_geometry((10, 4, 30, 8), false))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 30, 8)),
+                None,
+                false,
+                None,
+            ))
             .unwrap()
             .pane;
         assert_eq!(app.layout().focus, tiled);
@@ -22573,7 +22637,13 @@ fi
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let floating = app
-            .float_pane(floating_geometry((10, 4, 30, 8), true))
+            .float_pane(FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 30, 8)),
+                None,
+                true,
+                None,
+            ))
             .unwrap()
             .pane;
         assert_eq!(app.layout().focus, floating);

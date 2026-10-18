@@ -2564,29 +2564,18 @@ mod floating_render_tests {
     use crate::terminal::appearance::PaneAppearance;
     use crate::terminal::vt::{create_engine, VtEngineKind};
 
-    fn floating_request(
-        geometry: (u16, u16, u16, u16),
-        title: Option<&str>,
-    ) -> crate::app::FloatingPaneRequest {
-        let (x, y, width, height) = geometry;
-        crate::app::FloatingPaneRequest {
-            target: None,
-            width: Some(width),
-            height: Some(height),
-            x: Some(x),
-            y: Some(y),
-            title: title.map(str::to_string),
-            focus: true,
-            command: None,
-        }
-    }
-
     /// Create a floating pane with explicit outer geometry and let it take
     /// focus, as an ordinary `pane.float` request does.
     fn add_floating(app: &mut App, geometry: (u16, u16, u16, u16), title: Option<&str>) -> PaneId {
-        app.float_pane(floating_request(geometry, title))
-            .expect("floating pane is created")
-            .pane
+        app.float_pane(crate::app::FloatingPaneRequest::test(
+            None,
+            Some(geometry),
+            title,
+            true,
+            None,
+        ))
+        .expect("floating pane is created")
+        .pane
     }
 
     /// Give a pane its own VT engine with `text` on the first content row so a

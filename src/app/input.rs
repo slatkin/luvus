@@ -11429,16 +11429,13 @@ mod link_click_tests {
         (x, y, width, height): (u16, u16, u16, u16),
         focus: bool,
     ) -> crate::ids::PaneId {
-        app.float_pane(crate::app::FloatingPaneRequest {
-            target: None,
-            width: Some(width),
-            height: Some(height),
-            x: Some(x),
-            y: Some(y),
-            title: None,
+        app.float_pane(crate::app::FloatingPaneRequest::test(
+            None,
+            Some((x, y, width, height)),
+            None,
             focus,
-            command: None,
-        })
+            None,
+        ))
         .expect("floating pane is created")
         .pane
     }

@@ -432,6 +432,7 @@ pub(super) fn patch_terminal_damage(
     f: &mut RenderTarget,
     app: &App,
     content_rects: &[(PaneId, Rect)],
+    floating_count: usize,
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
     hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
@@ -440,22 +441,21 @@ pub(super) fn patch_terminal_damage(
     if !damage_covers_every_pane(app, &panes, content_rects, snapshots) {
         return Err(());
     }
+    // The retained list leads with every floating pane the frame drew, top
+    // first, so its prefix is the floating stack. Keep the count with the list:
+    // an overflow means the retained geometry is stale, not patchable.
+    let floating = content_rects.get(..floating_count).ok_or(())?;
     let mut cursor = None;
-    for (order, id) in panes.iter().copied().enumerate() {
-        let content = content_rects
-            .iter()
-            .find_map(|(candidate, rect)| (*candidate == id).then_some(*rect))
-            .ok_or(())?;
+    for (index, &(id, content)) in content_rects.iter().enumerate() {
         let snapshot = snapshots.get(&id).ok_or(())?;
         // Panes drawn above this one: every floating pane for a tiled pane, and
-        // the higher floating entries for a floating one (`panes` lists the
-        // floating stack top first after the tiled leaves). Patching a row
-        // clears the whole content row before it paints the damaged cells, so
-        // any covered cell in that row — not only the damaged ones — would be
+        // the higher floating entries for a floating one. Patching a row clears
+        // the whole content row before it paints the damaged cells, so any
+        // covered cell in that row — not only the damaged ones — would be
         // erased. Fall back to the full renderer instead of leaving holes in the
         // pane above.
         let covered = |row_rect: Rect| {
-            row_covered_by_floating(layout, &panes, order, id, content_rects, row_rect)
+            row_covered_by_floating(floating, index < floating_count, index, row_rect)
         };
         patch_pane_damage(f, app, id, content, snapshot, &covered, hyperlinks)?;
         if id == layout.focus {
@@ -493,36 +493,32 @@ fn damage_covers_every_pane(
 /// content rect expanded by one cell; deriving it here keeps the overlap test
 /// true for a passive render, which clamps for drawing only and never stores its
 /// rects in `App::pane_rects`.
-fn floating_drawn_rect(content_rects: &[(PaneId, Rect)], pane: PaneId) -> Option<Rect> {
-    content_rects
-        .iter()
-        .find(|(candidate, _)| *candidate == pane)
-        .map(|(_, content)| {
-            Rect::new(
-                content.x.saturating_sub(1),
-                content.y.saturating_sub(1),
-                content.width.saturating_add(2),
-                content.height.saturating_add(2),
-            )
-        })
+fn floating_drawn_rect(content: Rect) -> Rect {
+    Rect::new(
+        content.x.saturating_sub(1),
+        content.y.saturating_sub(1),
+        content.width.saturating_add(2),
+        content.height.saturating_add(2),
+    )
 }
 
-/// Whether a floating pane drawn above `id` covers any cell of `row_rect`.
+/// Whether a floating pane drawn above `content_rects[index]` covers any cell of
+/// `row_rect`. `floating` is the retained content list's floating prefix, top
+/// first, so a competitor's index is its stacking order; `id_floating` says
+/// whether the patched pane itself is in that prefix.
 fn row_covered_by_floating(
-    layout: &crate::layout::TileLayout,
-    panes: &[PaneId],
-    order: usize,
-    id: PaneId,
-    content_rects: &[(PaneId, Rect)],
+    floating: &[(PaneId, Rect)],
+    id_floating: bool,
+    index: usize,
     row_rect: Rect,
 ) -> bool {
-    let id_floating = layout.is_floating(id);
-    panes.iter().enumerate().any(|(other_order, other)| {
-        layout.is_floating(*other)
-            && (!id_floating || other_order < order)
-            && floating_drawn_rect(content_rects, *other)
-                .is_some_and(|rect| row_rect.intersects(rect))
-    })
+    floating
+        .iter()
+        .enumerate()
+        .any(|(other_index, (_, content))| {
+            (!id_floating || other_index < index)
+                && row_rect.intersects(floating_drawn_rect(*content))
+        })
 }
 
 /// Patch one pane's damaged rows into the retained buffer.
@@ -1368,6 +1364,7 @@ mod tests {
                 &mut target,
                 &app,
                 &content_rects,
+                app.pane_floating_count,
                 &snapshots,
                 &mut hyperlinks,
             )
@@ -1441,6 +1438,7 @@ mod tests {
                 &mut target,
                 &app,
                 &content_rects,
+                app.pane_floating_count,
                 &snapshots,
                 &mut hyperlinks,
             )
@@ -1469,11 +1467,123 @@ mod tests {
                 &mut target,
                 &app,
                 &content_rects,
+                app.pane_floating_count,
                 &snapshots,
                 &mut hyperlinks,
             ),
             Err(()),
             "an overlapped tiled row falls back to the full render"
+        );
+        recycle_snapshots(&app, snapshots);
+    }
+
+    /// Floating panes occlude each other by stacking order: a damaged row of the
+    /// lower pane that the higher pane covers must fall back to the full
+    /// renderer, while the lower pane's uncovered rows still patch in place.
+    #[test]
+    fn a_lower_floating_pane_falls_back_only_on_covered_rows() {
+        let _env = crate::persist::test_env("floating-damage-stack");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).expect("app starts");
+        let tiled = app.layout().focus;
+        let lower = app
+            .float_pane(floating_request((10, 4, 40, 8)))
+            .expect("lower floating pane")
+            .pane;
+        let upper = app
+            .float_pane(floating_request((20, 6, 40, 8)))
+            .expect("upper floating pane")
+            .pane;
+        let _tiled_engine = install_engine(&mut app, tiled, "tiled", 60, 20);
+        let lower_engine = install_engine(&mut app, lower, "", 38, 6);
+        let _upper_engine = install_engine(&mut app, upper, "", 38, 6);
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut retained = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut retained, area), &mut app);
+        let content_rects = app.pane_content_rects.clone();
+        let floating_count = app.pane_floating_count;
+        assert_eq!(floating_count, 2, "both floating panes were drawn");
+        settle_damage(&app);
+
+        let content_of = |id: PaneId| {
+            content_rects
+                .iter()
+                .find(|(candidate, _)| *candidate == id)
+                .map(|(_, rect)| *rect)
+                .expect("content rect")
+        };
+        let lower_content = content_of(lower);
+        let upper_content = content_of(upper);
+        // The upper pane's border starts one row above its content, so the lower
+        // pane's first row is clear of it while the upper content row is covered.
+        let uncovered_row = lower_content.y;
+        let covered_row = upper_content.y;
+        assert!(
+            uncovered_row < upper_content.y.saturating_sub(1),
+            "the lower row sits above the upper pane's border"
+        );
+        assert!(
+            (lower_content.y..lower_content.bottom()).contains(&covered_row),
+            "the upper content row overlaps the lower pane"
+        );
+
+        lower_engine
+            .lock()
+            .expect("engine lock")
+            .advance(b"\x1b[1;1HX");
+        let snapshots = damage_snapshots(&app);
+        let uncovered_index = uncovered_row - lower_content.y;
+        assert!(snapshots[&lower]
+            .rows
+            .iter()
+            .any(|row| row.row == uncovered_index));
+        let mut hyperlinks = app.rendered_hyperlinks.clone();
+        let mut patched = retained.clone();
+        {
+            let mut target = RenderTarget::new(&mut patched, area);
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                floating_count,
+                &snapshots,
+                &mut hyperlinks,
+            )
+            .expect("an uncovered lower floating row is patchable");
+        }
+        recycle_snapshots(&app, snapshots);
+        settle_damage(&app);
+
+        let mut forced = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut forced, area), &mut app);
+        assert_eq!(patched, forced, "the patch matches a full render");
+
+        let covered_index = covered_row - lower_content.y;
+        lower_engine
+            .lock()
+            .expect("engine lock")
+            .advance(format!("\x1b[{};1HY", covered_index + 1).as_bytes());
+        let snapshots = damage_snapshots(&app);
+        assert!(
+            snapshots[&lower]
+                .rows
+                .iter()
+                .any(|row| row.row == covered_index),
+            "the damaged row is the one the upper floating pane covers"
+        );
+        let mut target = RenderTarget::new(&mut patched, area);
+        assert_eq!(
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                floating_count,
+                &snapshots,
+                &mut hyperlinks,
+            ),
+            Err(()),
+            "a covered lower floating row falls back to the full render"
         );
         recycle_snapshots(&app, snapshots);
     }

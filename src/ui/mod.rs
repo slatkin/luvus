@@ -130,6 +130,8 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 /// hit-test state. Each client owns this baseline, never the shared App.
 pub(crate) struct ClientProjection {
     pub pane_content: Vec<(PaneId, Rect)>,
+    /// How many leading `pane_content` entries are floating panes, top first.
+    pub pane_floating_count: usize,
     pub hyperlinks: Vec<crate::app::RenderedHyperlink>,
     pub shell_dock: Option<Rect>,
     pub left_seam: Option<Rect>,
@@ -398,6 +400,9 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
 
     render_into_mode(f, app, false);
 
+    // The projection's own floating prefix, before the active client's count is
+    // restored below. A secondary viewport can draw a different floating set.
+    let projected_floating_count = app.pane_floating_count;
     let projected_shell_dock = app.client_shell_dock_rect;
     let projected_left_seam = app.left_seam;
     let projected_right_seam = app.right_seam;
@@ -543,6 +548,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     }
     ClientProjection {
         pane_content: projected_content,
+        pane_floating_count: projected_floating_count,
         hyperlinks: projected_hyperlinks,
         shell_dock: projected_shell_dock,
         left_seam: projected_left_seam,
@@ -609,10 +615,18 @@ pub(crate) fn patch_terminal_damage(
     target: &mut RenderTarget,
     app: &App,
     content_rects: &[(PaneId, Rect)],
+    floating_count: usize,
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
     hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
-    panes::patch_terminal_damage(target, app, content_rects, snapshots, hyperlinks)
+    panes::patch_terminal_damage(
+        target,
+        app,
+        content_rects,
+        floating_count,
+        snapshots,
+        hyperlinks,
+    )
 }
 
 fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
@@ -2428,6 +2442,7 @@ mod retained_render_tests {
                 &mut target,
                 &app,
                 &content_rects,
+                app.pane_floating_count,
                 &snapshots,
                 &mut hyperlinks,
             )
@@ -2501,6 +2516,7 @@ mod retained_render_tests {
                 &mut target,
                 &app,
                 &content_rects,
+                app.pane_floating_count,
                 &snapshots,
                 &mut hyperlinks,
             )

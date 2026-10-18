@@ -164,10 +164,13 @@ pub fn resolve_floating_geometry(
     if !floating_size_valid(width, height) {
         return None;
     }
-    let cascade =
-        (x.is_none() || y.is_none()).then(|| cascade_floating_position(area, width, height, last));
-    let x = x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
-    let y = y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
+    let (x, y) = match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        (x, y) => {
+            let (cx, cy) = cascade_floating_position(area, width, height, last);
+            (x.unwrap_or(cx), y.unwrap_or(cy))
+        }
+    };
     Some(FloatGeometry {
         rect: clamp_floating_rect(Rect::new(x, y, width, height), area),
         cascade: (x, y),
@@ -1723,6 +1726,14 @@ mod tests {
                 cascade: (30, 4),
             }),
             "a given x keeps its value while y cascades"
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(20), Some(8), None, Some(3), Some((4, 2))),
+            Some(FloatGeometry {
+                rect: Rect::new(8, 3, 20, 8),
+                cascade: (8, 3),
+            }),
+            "a given y keeps its value while x cascades"
         );
         assert_eq!(
             resolve_floating_geometry(area, Some(200), Some(10), Some(80), Some(2), None),

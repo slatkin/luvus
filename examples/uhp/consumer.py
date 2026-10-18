@@ -685,7 +685,7 @@ def valid_global_request(value, methods):
                 not integer(params[key]) or not minimum <= params[key] <= 65535
             ):
                 return False
-        if "title" in params and not isinstance(params["title"], str):
+        if "title" in params and not bounded_string(params["title"], 64):
             return False
         if "focus" in params and type(params["focus"]) is not bool:
             return False

@@ -240,7 +240,7 @@ impl App {
             height: floating_dimension(p, "height")?,
             x: optional_u16_param(p, "x")?,
             y: optional_u16_param(p, "y")?,
-            title: floating_title(p)?,
+            title: optional_bounded_string(p, "title", MAX_FLOATING_TITLE_CHARS)?,
             focus: floating_focus(p)?,
             command: floating_command(p)?,
         })
@@ -1920,6 +1920,13 @@ fn split_axis(app: &App, p: &Value, base: PaneId) -> Result<Axis, (String, Strin
     }
 }
 
+/// Maximum `pane.float` title length in characters.
+///
+/// Titles are drawn truncated to the border width and persisted in snapshots,
+/// so the API boundary bounds what a snapshot must store. The module path
+/// (`module` float panes) is intentionally not held to this limit.
+const MAX_FLOATING_TITLE_CHARS: usize = 64;
+
 /// Optional `pane.float` width or height: at least `MIN_FLOATING` cells.
 fn floating_dimension(p: &Value, key: &str) -> Result<Option<u16>, (String, String)> {
     let value = optional_u16_param(p, key)?;
@@ -1930,18 +1937,6 @@ fn floating_dimension(p: &Value, key: &str) -> Result<Option<u16>, (String, Stri
         ));
     }
     Ok(value)
-}
-
-/// Optional `pane.float` title.
-fn floating_title(p: &Value) -> Result<Option<String>, (String, String)> {
-    match p.get("title") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(title)) => Ok(Some(title.clone())),
-        Some(_) => Err((
-            "invalid_request".to_string(),
-            "title must be a string".to_string(),
-        )),
-    }
 }
 
 /// Optional `pane.float` focus flag; absent means the new pane takes focus.

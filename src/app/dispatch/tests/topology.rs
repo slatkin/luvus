@@ -1720,6 +1720,55 @@ fn pane_float_validates_before_spawning() {
     }
 }
 
+/// The API bounds a floating title because it is drawn truncated and stored in
+/// snapshots. Exactly 64 characters (counted as characters, not bytes) is the
+/// largest accepted value.
+#[test]
+fn pane_float_bounds_title_to_64_characters() {
+    let (_env, mut app) = app("pane-float-title-bound");
+
+    // Absent and null keep meaning "no title override".
+    for params in [json!({}), json!({ "title": null })] {
+        let out = app.dispatch("pane.float", &params).unwrap();
+        let pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.floating_title(pane), None, "params: {params}");
+    }
+
+    // 64 multi-byte characters are 128 bytes but 64 characters.
+    let longest = "é".repeat(64);
+    let out = app
+        .dispatch("pane.float", &json!({ "title": longest }))
+        .unwrap();
+    let pane = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+    assert_eq!(app.floating_title(pane), Some(longest.as_str()));
+
+    let panes = app.panes.len();
+    let error = app
+        .dispatch("pane.float", &json!({ "title": "é".repeat(65) }))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        (
+            "invalid_request".to_string(),
+            "title exceeds 64 characters".to_string()
+        )
+    );
+    assert_eq!(app.panes.len(), panes, "a rejected title spawns no pane");
+
+    // A non-string title keeps its existing rejection message.
+    let error = app
+        .dispatch("pane.float", &json!({ "title": 7 }))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        (
+            "invalid_request".to_string(),
+            "title must be a string".to_string()
+        )
+    );
+    assert_eq!(app.panes.len(), panes, "a rejected title spawns no pane");
+}
+
 #[test]
 fn pane_float_without_a_workspace_creates_one() {
     let (_env, mut app) = app("pane-float-no-workspace");

@@ -57,6 +57,9 @@ class PaneFloatTests(unittest.TestCase):
             self.assertValid({key: minimum - 1}, False)
         self.assertValid({"width": 65536}, False)
         self.assertValid({"x": -1}, False)
+        title_max = self.params["properties"]["title"]["maxLength"]
+        self.assertValid({"title": "t" * title_max}, True)
+        self.assertValid({"title": "t" * (title_max + 1)}, False)
 
     def test_shape_is_strict(self):
         for params in ({"pane": "7", "depth": 2}, {"title": 7},

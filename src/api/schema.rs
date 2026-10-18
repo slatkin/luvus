@@ -146,6 +146,8 @@ mod tests {
         assert_eq!(params["properties"]["x"]["minimum"], 0);
         assert_eq!(params["properties"]["y"]["minimum"], 0);
         assert_eq!(params["properties"]["command"]["minItems"], 1);
+        // The parser bounds the title to 64 characters; the contract must match.
+        assert_eq!(params["properties"]["title"]["maxLength"], 64);
         assert!(request["allOf"].as_array().unwrap().iter().any(|branch| {
             branch["if"]["properties"]["method"]["const"] == "pane.float"
                 && branch["then"]["properties"]["params"]["$ref"] == "#/$defs/paneFloatParams"

@@ -193,7 +193,7 @@ impl App {
             };
             self.require_tiled_api(base)?;
             let axis = split_axis(self, p, base)?;
-            let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
+            let focus = optional_bool_param(p, "focus", true)?;
             let new = self
                 .split_pane_in(base, axis, focus, cwd)
                 .ok_or_else(not_found)?;
@@ -241,7 +241,8 @@ impl App {
             x: optional_u16_param(p, "x")?,
             y: optional_u16_param(p, "y")?,
             title: optional_bounded_string(p, "title", MAX_FLOATING_TITLE_CHARS)?,
-            focus: floating_focus(p)?,
+            // Absent or `null` means the new pane takes focus.
+            focus: optional_bool_param(p, "focus", true)?,
             command: floating_command(p)?,
         })
     }
@@ -961,7 +962,7 @@ impl App {
             // you on. An explicit `luvus workspace open <path>` omits it and
             // still focuses.
             let path = PathBuf::from(req_str(p, "path")?);
-            let focus = p.get("focus").and_then(|v| v.as_bool()).unwrap_or(true);
+            let focus = optional_bool_param(p, "focus", true)?;
             match self
                 .workspaces
                 .iter()
@@ -1939,18 +1940,6 @@ fn floating_dimension(p: &Value, key: &str) -> Result<Option<u16>, (String, Stri
     Ok(value)
 }
 
-/// Optional `pane.float` focus flag; absent means the new pane takes focus.
-fn floating_focus(p: &Value) -> Result<bool, (String, String)> {
-    match p.get("focus") {
-        None | Some(Value::Null) => Ok(true),
-        Some(Value::Bool(focus)) => Ok(*focus),
-        Some(_) => Err((
-            "invalid_request".to_string(),
-            "focus must be a boolean".to_string(),
-        )),
-    }
-}
-
 /// Optional `pane.float` argv: a non-empty array of non-empty strings.
 fn floating_command(p: &Value) -> Result<Option<Vec<String>>, (String, String)> {
     match p.get("command") {
@@ -2141,6 +2130,118 @@ mod tests {
         app.dispatch("pane.split", &json!({"direction": "auto"}))
             .expect("portrait auto split");
         assert_eq!(split_axis(&app), 1, "physically tall panes stack");
+    }
+
+    #[test]
+    fn pane_split_validates_focus_and_defaults_it_to_true() {
+        let _env = crate::persist::test_env("pane-split-focus-param");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let before = app.layout().focus;
+        let panes_before = app.panes.len();
+        for value in [json!("false"), json!("true"), json!(0), json!([true])] {
+            assert_eq!(
+                app.dispatch("pane.split", &json!({"focus": value}))
+                    .unwrap_err(),
+                (
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                ),
+                "value: {value}"
+            );
+        }
+        assert_eq!(
+            app.panes.len(),
+            panes_before,
+            "invalid focus splits nothing"
+        );
+        assert_eq!(app.layout().focus, before);
+
+        // Absent or `null` still means the new pane takes focus.
+        for params in [json!({}), json!({"focus": null})] {
+            let result = app.dispatch("pane.split", &params).unwrap();
+            assert_eq!(result["pane"], app.layout().focus.0.to_string());
+        }
+        // An explicit `false` splits without moving focus.
+        let focused = app.layout().focus;
+        let result = app
+            .dispatch("pane.split", &json!({"focus": false}))
+            .unwrap();
+        assert_ne!(result["pane"], focused.0.to_string());
+        assert_eq!(app.layout().focus, focused);
+    }
+
+    #[test]
+    fn workspace_open_validates_focus_and_defaults_it_to_true() {
+        let _env = crate::persist::test_env("workspace-open-focus-param");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.new_workspace();
+        let opened = app.active_ws;
+        assert!(opened > 0, "a second workspace is active");
+        let path = app.workspaces[0].cwd.display().to_string();
+        let workspaces_before = app.workspaces.len();
+        for value in [json!("no"), json!(1), json!([])] {
+            assert_eq!(
+                app.dispatch("workspace.open", &json!({"path": path, "focus": value}))
+                    .unwrap_err(),
+                (
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                ),
+                "value: {value}"
+            );
+        }
+        assert_eq!(app.workspaces.len(), workspaces_before);
+        assert_eq!(app.active_ws, opened);
+
+        // Absent focus still activates the existing workspace.
+        app.dispatch("workspace.open", &json!({"path": path}))
+            .unwrap();
+        assert_eq!(app.active_ws, 0);
+
+        // `focus: false` adds a workspace without stealing focus.
+        let other = std::env::temp_dir().display().to_string();
+        app.dispatch("workspace.open", &json!({"path": other, "focus": false}))
+            .unwrap();
+        assert_eq!(app.workspaces.len(), workspaces_before + 1);
+        assert_eq!(app.active_ws, 0);
+    }
+
+    #[test]
+    fn pane_float_validates_focus_and_defaults_it_to_true() {
+        let _env = crate::persist::test_env("pane-float-focus-param");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let panes_before = app.panes.len();
+        for value in [json!("true"), json!(1), json!([])] {
+            assert_eq!(
+                app.dispatch("pane.float", &json!({"focus": value}))
+                    .unwrap_err(),
+                (
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                ),
+                "value: {value}"
+            );
+        }
+        assert_eq!(
+            app.panes.len(),
+            panes_before,
+            "invalid focus floats nothing"
+        );
+
+        // Absent focus still gives the new floating pane focus.
+        let result = app.dispatch("pane.float", &json!({})).unwrap();
+        assert_eq!(result["pane"], app.layout().focus.0.to_string());
+
+        // `focus: false` floats without stealing focus.
+        let focused = app.layout().focus;
+        let result = app
+            .dispatch("pane.float", &json!({"focus": false}))
+            .unwrap();
+        assert_ne!(result["pane"], focused.0.to_string());
+        assert_eq!(app.layout().focus, focused);
     }
 
     #[test]

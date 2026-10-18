@@ -539,6 +539,24 @@ pub(in crate::app::dispatch) fn optional_u32(
     }
 }
 
+/// Optional boolean flag. Absent or `null` keeps the method's documented
+/// default; any other non-boolean value is a request error instead of a silent
+/// default, so a typo cannot quietly change where focus goes.
+pub(in crate::app::dispatch) fn optional_bool_param(
+    p: &Value,
+    key: &str,
+    default: bool,
+) -> Result<bool, (String, String)> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            format!("{key} must be a boolean"),
+        )),
+    }
+}
+
 pub(in crate::app::dispatch) fn patched_config(
     current: &crate::config::Config,
     patch: &Value,
@@ -930,6 +948,40 @@ pub(in crate::app::dispatch) fn parse_reported_usage(
         value: usage,
         updated_at,
     })
+}
+
+#[cfg(test)]
+mod bool_param_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn optional_bool_param_keeps_the_default_and_rejects_other_types() {
+        assert_eq!(optional_bool_param(&json!({}), "focus", true), Ok(true));
+        assert_eq!(optional_bool_param(&json!({}), "focus", false), Ok(false));
+        assert_eq!(
+            optional_bool_param(&json!({"focus": null}), "focus", true),
+            Ok(true)
+        );
+        assert_eq!(
+            optional_bool_param(&json!({"focus": true}), "focus", false),
+            Ok(true)
+        );
+        assert_eq!(
+            optional_bool_param(&json!({"focus": false}), "focus", true),
+            Ok(false)
+        );
+        for value in [json!(0), json!(1), json!("false"), json!("true"), json!([])] {
+            assert_eq!(
+                optional_bool_param(&json!({"focus": value}), "focus", true),
+                Err((
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                )),
+                "value: {value}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

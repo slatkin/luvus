@@ -267,10 +267,7 @@ impl App {
     pub fn close_mission_tab(&mut self) {
         let at = self.ws().active_tab;
         if self.ws().tabs.get(at).is_some_and(Tab::is_mission) {
-            debug_assert!(
-                self.ws().tabs[at].layout.floating_rects().is_empty(),
-                "Mission Control tabs cannot own floating panes"
-            );
+            self.ws().tabs[at].debug_assert_no_floating("Mission Control");
             let ws = &mut self.workspaces[self.active_ws];
             ws.tabs.remove(at);
             if ws.tabs.is_empty() {

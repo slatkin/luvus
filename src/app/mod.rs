@@ -635,6 +635,18 @@ impl Tab {
         }
         emptied
     }
+
+    /// Debug-only tripwire for the dashboard tabs (git, ORCH, Mission
+    /// Control). They render from app state through a placeholder leaf, so a
+    /// floating pane on one is a broken invariant rather than leftover layout
+    /// to clean up. `label` names the dashboard so every caller keeps its own
+    /// message; a no-op in release builds.
+    pub(crate) fn debug_assert_no_floating(&self, label: &'static str) {
+        debug_assert!(
+            self.layout.floating_rects().is_empty(),
+            "{label} tabs cannot own floating panes"
+        );
+    }
 }
 
 /// The "what's running here?" overlay for one pane (click its title bar).
@@ -5824,6 +5836,7 @@ impl App {
             .get(tab)
             .ok_or(FloatingPaneError::PaneNotFound)?;
         if !tab.is_renameable() {
+            tab.debug_assert_no_floating("Git, ORCH, and Mission Control");
             return Err(FloatingPaneError::TargetNotPaneTab);
         }
         Ok(())

@@ -110,22 +110,22 @@ pub(in crate::app::dispatch) fn floating_pane_rejection() -> (String, String) {
 }
 
 pub(in crate::app::dispatch) fn floating_pane_error(err: FloatingPaneError) -> (String, String) {
-    let (code, message) = match err {
-        FloatingPaneError::PaneNotFound => ("not_found", "pane not found"),
+    let minimum = crate::layout::MIN_FLOATING;
+    match err {
+        FloatingPaneError::PaneNotFound => ("not_found".to_string(), "pane not found".to_string()),
         FloatingPaneError::TargetNotPaneTab => (
-            "invalid_request",
-            "target tab does not accept floating panes",
+            "invalid_request".to_string(),
+            "target tab does not accept floating panes".to_string(),
         ),
         FloatingPaneError::InvalidGeometry => (
-            "invalid_request",
-            "floating pane size must be at least 3 by 3",
+            "invalid_request".to_string(),
+            format!("floating pane size must be at least {minimum} by {minimum}"),
         ),
         FloatingPaneError::SpawnFailed => (
-            "spawn_failed",
-            "could not create a terminal in the home directory",
+            "spawn_failed".to_string(),
+            "could not create a terminal in the home directory".to_string(),
         ),
-    };
-    (code.to_string(), message.to_string())
+    }
 }
 
 pub(in crate::app::dispatch) fn agent_fork_error(err: AgentForkError) -> (String, String) {

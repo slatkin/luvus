@@ -5830,9 +5830,7 @@ impl App {
         focus: bool,
     ) -> Result<(), FloatingPaneError> {
         self.validate_floating_target(workspace, tab)?;
-        if geometry.width < crate::layout::MIN_FLOATING
-            || geometry.height < crate::layout::MIN_FLOATING
-        {
+        if !crate::layout::floating_size_valid(geometry.width, geometry.height) {
             return Err(FloatingPaneError::InvalidGeometry);
         }
         let layout = &mut self.workspaces[workspace].tabs[tab].layout;
@@ -5907,18 +5905,16 @@ impl App {
         self.validate_floating_target(workspace, tab)?;
 
         let area = self.split_area();
-        let (default_width, default_height) = crate::layout::default_floating_size(area);
-        let width = request.width.unwrap_or(default_width);
-        let height = request.height.unwrap_or(default_height);
-        if width < crate::layout::MIN_FLOATING || height < crate::layout::MIN_FLOATING {
-            return Err(FloatingPaneError::InvalidGeometry);
-        }
         let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
-        let cascade = (request.x.is_none() || request.y.is_none())
-            .then(|| crate::layout::cascade_floating_position(area, width, height, last_cascade));
-        let x = request.x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
-        let y = request.y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
-        let geometry = crate::layout::clamp_floating_rect(Rect::new(x, y, width, height), area);
+        let geometry = crate::layout::resolve_floating_geometry(
+            area,
+            request.width,
+            request.height,
+            request.x,
+            request.y,
+            last_cascade,
+        )
+        .ok_or(FloatingPaneError::InvalidGeometry)?;
 
         let cwds = self.spawn_cwds_for(workspace, target, None);
         let (cwd, fallback_cwds) = cwds.split_first().ok_or(FloatingPaneError::SpawnFailed)?;
@@ -5956,14 +5952,14 @@ impl App {
             pane_id,
             workspace,
             tab,
-            geometry,
+            geometry.rect,
             request.title,
             request.focus,
         ) {
             self.close_pane(pane_id);
             return Err(error);
         }
-        self.workspaces[workspace].tabs[tab].last_cascade = Some((x, y));
+        self.workspaces[workspace].tabs[tab].last_cascade = Some(geometry.cascade);
         Ok(FloatingPaneResult {
             pane: pane_id,
             workspace,

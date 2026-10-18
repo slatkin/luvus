@@ -130,6 +130,50 @@ pub fn cascade_floating_position(
     (x, y)
 }
 
+/// Whether an outer floating-pane size is at least [`MIN_FLOATING`] on both
+/// axes.
+pub fn floating_size_valid(width: u16, height: u16) -> bool {
+    width >= MIN_FLOATING && height >= MIN_FLOATING
+}
+
+/// A resolved floating-pane placement in pane-area cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FloatGeometry {
+    /// The clamped outer rect to store.
+    pub rect: Rect,
+    /// The requested top-left, remembered as the tab's cascade cursor.
+    pub cascade: (u16, u16),
+}
+
+/// Resolve a new floating pane's outer rect from requested size and position.
+///
+/// Missing `width`/`height` use [`default_floating_size`]; missing `x`/`y`
+/// cascade from `last` like [`cascade_floating_position`]. Returns `None` when
+/// the resulting size is below [`MIN_FLOATING`]. The rect is clamped to `area`.
+pub fn resolve_floating_geometry(
+    area: Rect,
+    width: Option<u16>,
+    height: Option<u16>,
+    x: Option<u16>,
+    y: Option<u16>,
+    last: Option<(u16, u16)>,
+) -> Option<FloatGeometry> {
+    let (default_width, default_height) = default_floating_size(area);
+    let width = width.unwrap_or(default_width);
+    let height = height.unwrap_or(default_height);
+    if !floating_size_valid(width, height) {
+        return None;
+    }
+    let cascade =
+        (x.is_none() || y.is_none()).then(|| cascade_floating_position(area, width, height, last));
+    let x = x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
+    let y = y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
+    Some(FloatGeometry {
+        rect: clamp_floating_rect(Rect::new(x, y, width, height), area),
+        cascade: (x, y),
+    })
+}
+
 /// Shrink and move a floating pane rect until it fits inside the pane area.
 ///
 /// The minimum outer size is [`MIN_FLOATING`] by [`MIN_FLOATING`], unless the
@@ -1507,6 +1551,39 @@ mod tests {
             clamp_floating_rect(Rect::new(0, 0, 1, 1), area),
             Rect::new(0, 0, 3, 3),
             "the outer size has a 3×3 minimum"
+        );
+    }
+
+    #[test]
+    fn resolved_floating_geometry_defaults_cascades_and_clamps() {
+        let area = Rect::new(0, 0, 120, 40);
+        assert_eq!(
+            resolve_floating_geometry(area, None, None, None, None, None),
+            Some(FloatGeometry {
+                rect: Rect::new(4, 2, 60, 10),
+                cascade: (4, 2),
+            })
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(20), Some(8), Some(30), None, Some((4, 2))),
+            Some(FloatGeometry {
+                rect: Rect::new(30, 4, 20, 8),
+                cascade: (30, 4),
+            }),
+            "a given x keeps its value while y cascades"
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(200), Some(10), Some(80), Some(2), None),
+            Some(FloatGeometry {
+                rect: Rect::new(0, 2, 120, 10),
+                cascade: (80, 2),
+            }),
+            "the rect clamps but the cascade cursor keeps the request"
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(2), None, None, None, None),
+            None,
+            "a requested size below the minimum is rejected"
         );
     }
 

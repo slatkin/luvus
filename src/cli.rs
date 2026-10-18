@@ -4265,15 +4265,18 @@ fn pane_float_option_value(flag: &str, raw: &str) -> Result<Value> {
         }
         return Ok(json!(raw));
     }
+    let minimum = crate::layout::MIN_FLOATING;
+    let whole_number_range =
+        |from: u16| format!("{flag} must be a whole number from {from} to {}", u16::MAX);
     let number = raw.parse::<u16>().map_err(|_| {
         if matches!(key, "width" | "height") {
-            anyhow!("{flag} must be a whole number from 3 to 65535")
+            anyhow!("{}", whole_number_range(minimum))
         } else {
-            anyhow!("{flag} must be a whole number from 0 to 65535")
+            anyhow!("{}", whole_number_range(0))
         }
     })?;
-    if matches!(key, "width" | "height") && number < crate::layout::MIN_FLOATING {
-        return Err(anyhow!("{flag} must be a whole number from 3 to 65535"));
+    if matches!(key, "width" | "height") && number < minimum {
+        return Err(anyhow!("{}", whole_number_range(minimum)));
     }
     Ok(json!(number))
 }

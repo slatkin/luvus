@@ -640,7 +640,7 @@ impl App {
         &self,
         module_id: &str,
         entry: &crate::module::manifest::PaneEntry,
-    ) -> Result<(usize, usize, Rect, u16, u16), String> {
+    ) -> Result<(usize, usize, crate::layout::FloatGeometry), String> {
         let workspace = self.active_ws;
         let tab = self
             .workspaces
@@ -650,23 +650,23 @@ impl App {
         self.validate_floating_target(workspace, tab)
             .map_err(|_| format!("module {module_id} cannot open a floating pane in this tab"))?;
         let area = self.split_area();
-        let (default_width, default_height) = crate::layout::default_floating_size(area);
-        let width = entry.width.unwrap_or(default_width);
-        let height = entry.height.unwrap_or(default_height);
-        if width < crate::layout::MIN_FLOATING || height < crate::layout::MIN_FLOATING {
-            return Err(format!(
+        let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
+        let geometry = crate::layout::resolve_floating_geometry(
+            area,
+            entry.width,
+            entry.height,
+            entry.x,
+            entry.y,
+            last_cascade,
+        )
+        .ok_or_else(|| {
+            format!(
                 "pane {}: width and height must be at least {}",
                 entry.id,
                 crate::layout::MIN_FLOATING
-            ));
-        }
-        let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
-        let cascade = (entry.x.is_none() || entry.y.is_none())
-            .then(|| crate::layout::cascade_floating_position(area, width, height, last_cascade));
-        let x = entry.x.or_else(|| cascade.map(|(x, _)| x)).unwrap_or(0);
-        let y = entry.y.or_else(|| cascade.map(|(_, y)| y)).unwrap_or(0);
-        let geometry = crate::layout::clamp_floating_rect(Rect::new(x, y, width, height), area);
-        Ok((workspace, tab, geometry, x, y))
+            )
+        })?;
+        Ok((workspace, tab, geometry))
     }
 
     /// Place a freshly spawned module pane per its entry's placement. A floating
@@ -678,7 +678,7 @@ impl App {
         module_id: &str,
         entry: &crate::module::manifest::PaneEntry,
         placement: &str,
-        floating: Option<(usize, usize, Rect, u16, u16)>,
+        floating: Option<(usize, usize, crate::layout::FloatGeometry)>,
     ) -> Result<(), String> {
         match placement {
             "tab" => {
@@ -692,14 +692,14 @@ impl App {
                 self.zoomed = true; // fill the screen, overlay-style
             }
             "floating" => {
-                let Some((workspace, tab, geometry, x, y)) = floating else {
+                let Some((workspace, tab, geometry)) = floating else {
                     return Err(format!("module {module_id} has no floating geometry"));
                 };
                 if let Err(error) = self.attach_floating(
                     id,
                     workspace,
                     tab,
-                    geometry,
+                    geometry.rect,
                     Some(entry.title.clone()),
                     true,
                 ) {
@@ -714,7 +714,7 @@ impl App {
                     };
                     return Err(format!("cannot open floating module pane: {reason}"));
                 }
-                self.workspaces[workspace].tabs[tab].last_cascade = Some((x, y));
+                self.workspaces[workspace].tabs[tab].last_cascade = Some(geometry.cascade);
             }
             _ => {
                 self.split_focused_auto(id);

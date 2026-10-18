@@ -320,6 +320,21 @@ impl TileLayout {
         true
     }
 
+    /// Focus a pane while keeping the tiled/floating bookkeeping in step: a
+    /// floating pane rises to the top of the stack and the last focused tiled
+    /// pane stays `tiled_focus`; a tiled pane becomes `tiled_focus`.
+    ///
+    /// This is the single owner of the raise/`tiled_focus` rule, so callers
+    /// cannot focus a pane without it.
+    pub fn set_focus(&mut self, id: PaneId) {
+        if self.is_floating(id) {
+            self.raise(id);
+        } else {
+            self.tiled_focus = id;
+        }
+        self.focus = id;
+    }
+
     /// Whether a pane belongs to this layout, without allocating a leaf list.
     pub fn contains(&self, id: PaneId) -> bool {
         contains_leaf(&self.root, id) || self.is_floating(id)
@@ -1457,6 +1472,27 @@ mod tests {
         assert!(layout.contains(second));
         assert_eq!(layout.all_panes(), vec![a, b, third, second]);
         assert_eq!(layout.leaves(), vec![a, b]);
+    }
+
+    #[test]
+    fn set_focus_raises_floats_and_tracks_tiled_focus() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let (first, second) = (PaneId::alloc(), PaneId::alloc());
+        layout.add_floating(first, Rect::new(0, 2, 20, 8));
+        layout.add_floating(second, Rect::new(4, 4, 20, 8));
+
+        layout.set_focus(first);
+        assert_eq!(layout.focus, first);
+        assert_eq!(layout.tiled_focus, b, "a float keeps the tiled focus");
+        assert_eq!(floating_ids(&layout), vec![first, second], "focus raises");
+
+        layout.set_focus(a);
+        assert_eq!(layout.focus, a);
+        assert_eq!(layout.tiled_focus, a, "a tiled pane becomes tiled focus");
+        assert_eq!(floating_ids(&layout), vec![first, second], "stack is kept");
     }
 
     #[test]

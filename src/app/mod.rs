@@ -619,6 +619,22 @@ impl Tab {
     pub fn is_renameable(&self) -> bool {
         !self.is_git() && !self.is_orch() && !self.is_mission()
     }
+
+    /// Remove a pane from this tab and clear its floating bookkeeping: the
+    /// title override always, and the cascade cursor once no floating pane is
+    /// left. Returns `true` when the tiled tree is now empty.
+    ///
+    /// This is the single owner of the removal cleanup, so a caller cannot
+    /// detach a pane and leave stale floating state behind.
+    pub(crate) fn remove_pane(&mut self, id: PaneId) -> bool {
+        let emptied = self.layout.remove(id);
+        self.floating_titles.remove(&id);
+        if self.layout.floating_rects().is_empty() {
+            // A fresh cascade starts again after the last floating pane.
+            self.last_cascade = None;
+        }
+        emptied
+    }
 }
 
 /// The "what's running here?" overlay for one pane (click its title bar).
@@ -8050,7 +8066,7 @@ impl App {
 
         // Detach only after every fallible check has passed. The pane remains in
         // `App.panes`; only its layout-tree parent changes.
-        let emptied = self.workspaces[wsi].tabs[src].layout.remove(pane);
+        let emptied = self.workspaces[wsi].tabs[src].remove_pane(pane);
         if emptied {
             // The source tab has no tiled pane left, so its floating panes close
             // with it instead of leaking behind a removed tab.
@@ -9336,16 +9352,10 @@ impl App {
         history.push(id);
     }
 
-    /// Set a tab's pane focus and keep floating bookkeeping in step: a floating
-    /// pane rises to the top, a tiled pane becomes `tiled_focus`.
+    /// Set a tab's pane focus; [`TileLayout::set_focus`] owns the floating
+    /// raise and `tiled_focus` bookkeeping.
     fn set_tab_focus(&mut self, workspace: usize, tab: usize, id: PaneId) {
-        let layout = &mut self.workspaces[workspace].tabs[tab].layout;
-        if layout.is_floating(id) {
-            layout.raise(id);
-        } else {
-            layout.tiled_focus = id;
-        }
-        layout.focus = id;
+        self.workspaces[workspace].tabs[tab].layout.set_focus(id);
     }
 
     fn set_focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
@@ -9378,7 +9388,7 @@ impl App {
         } else {
             // Re-focusing the floating pane that already has focus still raises
             // it above a newer no-focus floating pane.
-            self.workspaces[workspace].tabs[tab].layout.raise(id);
+            self.workspaces[workspace].tabs[tab].layout.set_focus(id);
             self.mode = Mode::Normal;
         }
     }
@@ -10053,13 +10063,7 @@ impl App {
         self.release_leaf_ownership(id);
         self.session_dirty = true;
         if let Some((workspace, tab)) = owner {
-            let tab_is_empty = self.workspaces[workspace].tabs[tab].layout.remove(id);
-            let tab_state = &mut self.workspaces[workspace].tabs[tab];
-            tab_state.floating_titles.remove(&id);
-            if tab_state.layout.floating_rects().is_empty() {
-                // A fresh cascade starts again after the last floating pane.
-                tab_state.last_cascade = None;
-            }
+            let tab_is_empty = self.workspaces[workspace].tabs[tab].remove_pane(id);
             if let Some((_, _, target)) = floating_focus_return {
                 if self.workspaces[workspace].tabs[tab].layout.contains(target) {
                     self.set_tab_focus(workspace, tab, target);

@@ -1404,29 +1404,29 @@ fn floating_frame_rects(
     if resize_panes && previous_pane_area != pane_area {
         app.clamp_stored_floating_rects(pane_bounds);
     }
-    let mut floating: Vec<(PaneId, Rect)> = if app.zoomed {
-        Vec::new()
-    } else {
-        // `floating_rects` is top first; draw order is bottom to top.
-        let mut rects = app.layout().floating_rects();
-        rects.reverse();
-        rects
-    };
+    if app.zoomed {
+        return Vec::new();
+    }
     // Compact presentation fills the screen with the focused pane, so a focused
     // floating pane is already drawn there and must not draw twice.
-    if app.compact {
-        floating.retain(|(id, _)| *id != focus);
-    }
-    for (_, rect) in &mut floating {
-        let clamped = crate::layout::clamp_floating_rect(*rect, pane_bounds);
-        *rect = Rect::new(
-            pane_area.x + clamped.x,
-            pane_area.y + clamped.y,
-            clamped.width,
-            clamped.height,
-        );
-    }
-    floating
+    let compact = app.compact;
+    app.layout()
+        .floating_bottom_first()
+        .iter()
+        .filter(|(id, _)| !compact || *id != focus)
+        .map(|(id, rect)| {
+            let clamped = crate::layout::clamp_floating_rect(*rect, pane_bounds);
+            (
+                *id,
+                Rect::new(
+                    pane_area.x + clamped.x,
+                    pane_area.y + clamped.y,
+                    clamped.width,
+                    clamped.height,
+                ),
+            )
+        })
+        .collect()
 }
 
 /// The focused pane's own rect when it carries ✕ / ⤢ chrome. A floating pane

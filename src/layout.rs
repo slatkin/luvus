@@ -310,6 +310,13 @@ impl TileLayout {
         self.floating.iter().rev().copied().collect()
     }
 
+    /// Stored floating pane rects in draw order: bottom first and top last,
+    /// the order the stack is stored in. Rects are outer rects in pane-area
+    /// cells, unclamped against any client viewport.
+    pub fn floating_bottom_first(&self) -> &[(PaneId, Rect)] {
+        &self.floating
+    }
+
     /// Stored rect of one floating pane, without allocating the full list.
     /// Tiled and unknown IDs return `None`.
     pub fn floating_rect(&self, id: PaneId) -> Option<Rect> {

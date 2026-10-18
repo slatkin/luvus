@@ -179,14 +179,13 @@ impl App {
         workspace_cwd: &std::path::Path,
         leaves: &[PaneId],
     ) -> Option<usize> {
-        if self.workspaces.get(workspace)?.cwd != workspace_cwd {
+        let ws = self.workspaces.get(workspace)?;
+        if ws.cwd != *workspace_cwd {
             return None;
         }
-        self.resolve_tab_menu_target(&super::TabMenuTarget {
-            workspace,
-            leaves: leaves.to_vec(),
-        })
-        .map(|(_, tab)| tab)
+        ws.tabs
+            .iter()
+            .position(|tab| tab.layout.all_panes() == leaves)
     }
 
     fn search_recent_files(&self) -> Vec<SearchEntry> {

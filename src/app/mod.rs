@@ -711,14 +711,19 @@ pub struct WorktreeOpenList {
     pub cursor: usize,
 }
 
-/// Stable-enough identity for a tab context-menu target. A tab's complete leaf
-/// set is unique inside a live session, including dashboard placeholder leaves.
-/// Resolving this snapshot at click time prevents an intervening API reorder
-/// from making the menu act on whichever tab later occupies the old index.
+/// Stable identity for a tab context-menu target: the workspace plus the tab's
+/// public [`Tab::id`], which survives moves, swaps, and reorders for a server
+/// lifetime. Resolving this snapshot at click time prevents an intervening API
+/// reorder from making the menu act on whichever tab later occupies the old
+/// index.
+///
+/// A tab id is not a leaf snapshot, so a pane-set change between menu-open and
+/// click does not cancel the action: the menu still acts on the same tab. A tab
+/// that is closed entirely resolves to `None` and fails closed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TabMenuTarget {
     pub workspace: usize,
-    pub leaves: Vec<PaneId>,
+    pub tab_id: String,
 }
 
 /// A right-click context menu on a tab. Reorder availability and module actions
@@ -6952,16 +6957,13 @@ impl App {
         let tab = self.workspaces.get(workspace)?.tabs.get(index)?;
         Some(TabMenuTarget {
             workspace,
-            leaves: tab.layout.all_panes(),
+            tab_id: tab.id.clone(),
         })
     }
 
     fn resolve_tab_menu_target(&self, target: &TabMenuTarget) -> Option<(usize, usize)> {
         let ws = self.workspaces.get(target.workspace)?;
-        let index = ws
-            .tabs
-            .iter()
-            .position(|tab| tab.layout.all_panes() == target.leaves)?;
+        let index = ws.tabs.iter().position(|tab| tab.id == target.tab_id)?;
         Some((target.workspace, index))
     }
 
@@ -18115,6 +18117,60 @@ fi
         app.tab_menu = None;
         app.open_tab_menu(3, 10, 2); // the tab bar's `+` pseudo-index
         assert!(app.tab_menu.is_none());
+    }
+
+    #[test]
+    fn tab_menu_target_follows_its_tab_across_an_intervening_reorder() {
+        let _env = crate::persist::test_env("tab-menu-reorder-id");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].tabs = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| {
+                let mut tab = Tab::panes(TileLayout::new(PaneId::alloc()));
+                tab.name = Some(name.to_string());
+                tab
+            })
+            .collect();
+        app.workspaces[0].active_tab = 0;
+
+        // The menu opens on A; an API move then pushes A to the last position.
+        app.open_tab_menu(0, 10, 2);
+        app.move_tab(0, 2).unwrap();
+        app.tab_menu_action(TabMenuItem::MoveLeft);
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["b", "a", "c"], "the menu still acts on A");
+    }
+
+    #[test]
+    fn tab_menu_target_acts_on_its_tab_after_the_pane_set_changes() {
+        let _env = crate::persist::test_env("tab-menu-pane-set-id");
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let tab_id = app.workspaces[0].tabs[0].id.clone();
+        app.open_tab_menu(0, 10, 2);
+        let before = app.workspaces[0].tabs[0].layout.all_panes();
+
+        // A pane joins the target tab while the menu is open: the old leaf-set
+        // identity would no longer match, while the stable tab id still does.
+        app.workspaces[0].tabs[0]
+            .layout
+            .split_focused(crate::layout::Axis::Col, PaneId::alloc());
+        assert_ne!(app.workspaces[0].tabs[0].layout.all_panes(), before);
+        assert_eq!(app.workspaces[0].tabs[0].id, tab_id);
+
+        app.tab_menu_action(TabMenuItem::Rename);
+        let rename = app.tab_rename.as_ref().expect("rename modal opened");
+        assert_eq!(app.resolve_tab_menu_target(&rename.target), Some((0, 0)));
+        app.handle_tab_rename_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_tab_rename_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.ws().tabs[0].name.as_deref(), Some("x"));
     }
 
     #[test]

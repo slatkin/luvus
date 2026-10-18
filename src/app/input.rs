@@ -4056,13 +4056,17 @@ impl App {
     /// a cell inside a pane's content belongs to the pane, never to a divider.
     ///
     /// A floating pane covers its border as well as its content: when the
-    /// topmost pane at the cell floats, only that pane's content may own the
-    /// cell. A press on its border belongs to no pane and must not reach the
-    /// tiled pane drawn underneath.
+    /// topmost pane at the cell was drawn floating, only that pane's content may
+    /// own the cell. A press on its border belongs to no pane and must not reach
+    /// the tiled pane drawn underneath.
     pub(super) fn pane_content_at(&self, x: u16, y: u16) -> Option<(PaneId, Rect)> {
         let hit = |r: &Rect| x >= r.x && x < r.right() && y >= r.y && y < r.bottom();
-        if let Some(topmost) = self.topmost_pane_at(x, y) {
-            if self.layout().is_floating(topmost) {
+        // `pane_rects` leads with the floating panes the renderer actually drew,
+        // so an index inside that prefix is the floating stack. The layout is not
+        // consulted here: it can hold floating panes the frame did not draw.
+        if let Some(index) = self.pane_rects.iter().position(|(_, rect)| hit(rect)) {
+            let topmost = self.pane_rects[index].0;
+            if index < self.pane_floating_count {
                 return self
                     .pane_content_rects
                     .iter()

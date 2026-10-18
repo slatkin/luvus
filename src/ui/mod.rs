@@ -272,6 +272,9 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     // Geometry collections are write-only outputs of a render. Move the active
     // client's values aside instead of cloning them on every secondary frame.
     let pane_rects = std::mem::take(&mut app.pane_rects);
+    // The count belongs to `pane_rects`; a projection renders at its own size,
+    // so keep the active client's pair together and restore them below.
+    let pane_floating_count = std::mem::replace(&mut app.pane_floating_count, 0);
     let pane_content_rects = std::mem::take(&mut app.pane_content_rects);
     let rendered_hyperlinks = std::mem::take(&mut app.rendered_hyperlinks);
     let pane_title_rects = std::mem::take(&mut app.pane_title_rects);
@@ -428,6 +431,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     app.file_tree.scroll = file_tree_scroll;
     app.menu_scroll = menu_scroll;
     app.pane_rects = pane_rects;
+    app.pane_floating_count = pane_floating_count;
     let projected_content = std::mem::replace(&mut app.pane_content_rects, pane_content_rects);
     let projected_hyperlinks = std::mem::replace(&mut app.rendered_hyperlinks, rendered_hyperlinks);
     app.pane_title_rects = pane_title_rects;
@@ -665,6 +669,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     if app.workspaces.is_empty() {
         f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
         app.pane_rects.clear();
+        app.pane_floating_count = 0;
         app.pane_content_rects.clear();
         app.pane_title_rects.clear();
         app.tab_rects.clear();
@@ -1336,7 +1341,26 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // event to the topmost pane and give covered tiled cells nothing.
     let mut pane_rects: Vec<(PaneId, Rect)> = Vec::with_capacity(floating.len() + tiled.len());
     pane_rects.extend(floating.iter().rev().copied());
+    let pane_floating_count = floating.len();
     pane_rects.extend(tiled.iter().copied());
+    // Hit tests treat this prefix as the floating stack. It must match what was
+    // drawn, not the layout: zoom draws none, and compact skips the focused pane
+    // because it is already the full-screen tiled pane.
+    debug_assert!(
+        pane_rects[..pane_floating_count]
+            .iter()
+            .all(|(id, _)| app.layout().is_floating(*id)),
+        "drawn floating pane is no longer floating in the layout: {:?}",
+        &pane_rects[..pane_floating_count]
+    );
+    debug_assert!(
+        !app.compact
+            || !pane_rects[..pane_floating_count]
+                .iter()
+                .any(|(id, _)| *id == focus),
+        "compact mode drew the focused pane as floating"
+    );
+    app.pane_floating_count = pane_floating_count;
     app.pane_rects = pane_rects;
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;

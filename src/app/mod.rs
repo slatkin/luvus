@@ -3310,6 +3310,11 @@ pub struct App {
     pub cell_height_px: u16,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
+    /// How many leading entries of `pane_rects` are floating panes that were
+    /// actually drawn this frame. Render stores it so hit tests can treat that
+    /// prefix as the floating stack without asking the layout, which may hold
+    /// floating panes the frame did not draw (zoom, compact focus).
+    pub pane_floating_count: usize,
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
     /// position to a grid cell for text selection.
     pub pane_content_rects: Vec<(PaneId, Rect)>,
@@ -3829,6 +3834,7 @@ impl App {
             cell_width_px: 0,
             cell_height_px: 0,
             pane_rects: Vec::new(),
+            pane_floating_count: 0,
             pane_content_rects: Vec::new(),
             rendered_hyperlinks: Vec::new(),
             scroll_pane: None,
@@ -4571,6 +4577,7 @@ impl App {
             cell_width_px: 0,
             cell_height_px: 0,
             pane_rects: Vec::new(),
+            pane_floating_count: 0,
             pane_content_rects: Vec::new(),
             rendered_hyperlinks: Vec::new(),
             scroll_pane: None,

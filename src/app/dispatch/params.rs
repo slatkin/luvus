@@ -6,6 +6,11 @@ pub(in crate::app::dispatch) fn not_found() -> (String, String) {
     ("not_found".to_string(), "pane not found".to_string())
 }
 
+/// Request error for a parameter that fails validation.
+pub(in crate::app::dispatch) fn invalid(message: &str) -> (String, String) {
+    ("invalid_request".to_string(), message.to_string())
+}
+
 /// Fence prompt submission to the PTY lifetime the caller observed. Pane IDs
 /// can be reused after a server restart, while terminal IDs cannot.
 pub(in crate::app::dispatch) fn check_agent_terminal_id(

@@ -1901,21 +1901,16 @@ impl App {
 /// `pane.split` direction: `auto` follows the base pane's shape, `down` and
 /// `stack` split a row, and `right` splits a column.
 fn split_axis(app: &App, p: &Value, base: PaneId) -> Result<Axis, (String, String)> {
-    let invalid = || {
-        (
-            "invalid_request".to_string(),
-            "direction must be auto, right, or down".to_string(),
-        )
-    };
+    const INVALID_DIRECTION: &str = "direction must be auto, right, or down";
     match p.get("direction") {
         None | Some(Value::Null) => Ok(app.auto_split_axis_for(base)),
         Some(Value::String(dir)) => match dir.as_str() {
             "auto" => Ok(app.auto_split_axis_for(base)),
             "down" | "stack" => Ok(Axis::Row),
             "right" => Ok(Axis::Col),
-            _ => Err(invalid()),
+            _ => Err(invalid(INVALID_DIRECTION)),
         },
-        Some(_) => Err(invalid()),
+        Some(_) => Err(invalid(INVALID_DIRECTION)),
     }
 }
 
@@ -1930,10 +1925,10 @@ const MAX_FLOATING_TITLE_CHARS: usize = 64;
 fn floating_dimension(p: &Value, key: &str) -> Result<Option<u16>, (String, String)> {
     let value = optional_u16_param(p, key)?;
     if value.is_some_and(|value| value < crate::layout::MIN_FLOATING) {
-        return Err((
-            "invalid_request".to_string(),
-            format!("{key} must be at least {}", crate::layout::MIN_FLOATING),
-        ));
+        return Err(invalid(&format!(
+            "{key} must be at least {}",
+            crate::layout::MIN_FLOATING
+        )));
     }
     Ok(value)
 }
@@ -1946,31 +1941,22 @@ fn floating_command(p: &Value) -> Result<Option<Vec<String>>, (String, String)> 
             let mut argv = Vec::with_capacity(items.len());
             for item in items {
                 let argument = item.as_str().filter(|argument| !argument.is_empty());
-                argv.push(argument.ok_or_else(|| {
-                    (
-                        "invalid_request".to_string(),
-                        "command must be an array of non-empty strings".to_string(),
-                    )
-                })?);
+                argv.push(
+                    argument
+                        .ok_or_else(|| invalid("command must be an array of non-empty strings"))?,
+                );
             }
             if argv.is_empty() {
-                return Err((
-                    "invalid_request".to_string(),
-                    "command must not be empty".to_string(),
-                ));
+                return Err(invalid("command must not be empty"));
             }
             Ok(Some(argv.into_iter().map(str::to_string).collect()))
         }
-        Some(_) => Err((
-            "invalid_request".to_string(),
-            "command must be an array of strings".to_string(),
-        )),
+        Some(_) => Err(invalid("command must be an array of strings")),
     }
 }
 
 /// `{cwd, prompt}` from a session report that cannot name its pane.
 fn parse_session_evidence(value: &Value) -> Result<(std::path::PathBuf, String), (String, String)> {
-    let invalid = |message: &str| ("invalid_request".to_string(), message.to_string());
     let Some(object) = value.as_object() else {
         return Err(invalid("evidence must be an object"));
     };

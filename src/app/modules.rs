@@ -599,24 +599,9 @@ impl App {
 
         // The pane runs the argv in the module root (so relative paths resolve);
         // the script reads the workspace cwd from the context.
-        let id = PaneId::alloc();
-        let history_budget_bytes = self.config.scrollback_bytes();
-        let pane = Pane::spawn_command(
-            id,
-            80,
-            24,
-            root,
-            self.app_tx.clone(),
-            &argv,
-            &env,
-            history_budget_bytes,
-            self.pane_appearance,
-        )
-        .map_err(|e| format!("cannot spawn module pane: {e}"))?;
-        let cmd = pane.command.clone();
-        self.panes.insert(id, pane);
-        self.status.insert(id, PaneStatus::new(cmd));
-        self.session_dirty = true;
+        let id = self
+            .spawn_registered_command_pane(root, &argv, &env)
+            .map_err(|e| format!("cannot spawn module pane: {e}"))?;
 
         self.place_module_pane(id, &module_id, &entry, placement, floating)?;
         self.module_panes.insert(

@@ -5521,6 +5521,39 @@ impl App {
 
     // ── mutations ─────────────────────────────────────────────────────────────
 
+    /// Spawn `argv` with `env` in `cwd` and register the new pane in the flat
+    /// pane and status maps, marking the session dirty.
+    ///
+    /// The two callers publish different `pane.created` payloads, so this never
+    /// emits; keep each event at its own call site. `src/app/backend.rs` spawns
+    /// on a background thread without `&mut App` and registers through
+    /// `BackendCreateReady`, so it must not use this helper.
+    fn spawn_registered_command_pane(
+        &mut self,
+        cwd: PathBuf,
+        argv: &[String],
+        env: &[(String, String)],
+    ) -> Result<PaneId> {
+        let id = PaneId::alloc();
+        let history_budget_bytes = self.config.scrollback_bytes();
+        let pane = Pane::spawn_command(
+            id,
+            80,
+            24,
+            cwd,
+            self.app_tx.clone(),
+            argv,
+            env,
+            history_budget_bytes,
+            self.pane_appearance,
+        )?;
+        let cmd = pane.command.clone();
+        self.panes.insert(id, pane);
+        self.status.insert(id, PaneStatus::new(cmd));
+        self.session_dirty = true;
+        Ok(id)
+    }
+
     fn spawn_into(&mut self, cwd: PathBuf) -> Option<PaneId> {
         let id = PaneId::alloc();
         let shell = crate::platform::resolve_shell(&self.config.shell);
@@ -5988,23 +6021,9 @@ impl App {
         let (cwd, fallback_cwds) = cwds.split_first().ok_or(FloatingPaneError::SpawnFailed)?;
         let pane_id = match request.command {
             Some(argv) => {
-                let id = PaneId::alloc();
-                let pane = Pane::spawn_command(
-                    id,
-                    80,
-                    24,
-                    cwd.clone(),
-                    self.app_tx.clone(),
-                    &argv,
-                    &[],
-                    self.config.scrollback_bytes(),
-                    self.pane_appearance,
-                )
-                .map_err(|_| FloatingPaneError::SpawnFailed)?;
-                let cmd = pane.command.clone();
-                self.panes.insert(id, pane);
-                self.status.insert(id, PaneStatus::new(cmd));
-                self.session_dirty = true;
+                let id = self
+                    .spawn_registered_command_pane(cwd.clone(), &argv, &[])
+                    .map_err(|_| FloatingPaneError::SpawnFailed)?;
                 self.emit_event(
                     "pane.created",
                     serde_json::json!({"pane": id.0.to_string()}),

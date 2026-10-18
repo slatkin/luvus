@@ -285,10 +285,16 @@ impl TileLayout {
     /// Stored rect of one floating pane, without allocating the full list.
     /// Tiled and unknown IDs return `None`.
     pub fn floating_rect(&self, id: PaneId) -> Option<Rect> {
-        self.floating
-            .iter()
-            .find(|(pane, _)| *pane == id)
-            .map(|(_, rect)| *rect)
+        self.floating_position(id).map(|(_, rect)| rect)
+    }
+
+    /// Stored outer rect and top-first stacking position of one floating pane,
+    /// without allocating the full list. `0` is the top of the stack, matching
+    /// [`Self::floating_rects`]. Tiled and unknown IDs return `None`.
+    pub fn floating_position(&self, id: PaneId) -> Option<(usize, Rect)> {
+        // `self.floating` is bottom first, so the top-first position inverts.
+        let bottom = self.floating.iter().position(|(pane, _)| *pane == id)?;
+        Some((self.floating.len() - 1 - bottom, self.floating[bottom].1))
     }
 
     /// Whether `id` is a floating pane.
@@ -1518,6 +1524,38 @@ mod tests {
             layout.floating_rects(),
             before,
             "tiled and unknown IDs are ignored"
+        );
+    }
+
+    #[test]
+    fn floating_position_inverts_the_bottom_first_stack() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let (bottom, middle, top) = (PaneId::alloc(), PaneId::alloc(), PaneId::alloc());
+        let bottom_rect = Rect::new(0, 0, 20, 8);
+        let middle_rect = Rect::new(2, 1, 20, 8);
+        let top_rect = Rect::new(4, 2, 20, 8);
+        layout.add_floating(bottom, bottom_rect);
+        layout.add_floating(middle, middle_rect);
+        layout.add_floating(top, top_rect);
+
+        assert_eq!(layout.floating_position(top), Some((0, top_rect)));
+        assert_eq!(layout.floating_position(middle), Some((1, middle_rect)));
+        assert_eq!(layout.floating_position(bottom), Some((2, bottom_rect)));
+        assert_eq!(
+            layout.floating_position(a),
+            None,
+            "tiled panes are not floats"
+        );
+        assert_eq!(layout.floating_position(PaneId(999)), None);
+        assert_eq!(
+            layout.floating_position(middle),
+            layout
+                .floating_rects()
+                .iter()
+                .position(|(id, _)| *id == middle)
+                .map(|z| (z, middle_rect)),
+            "the position matches floating_rects order"
         );
     }
 

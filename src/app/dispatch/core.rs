@@ -167,8 +167,7 @@ impl App {
                     .all_panes()
                     .into_iter()
                     .map(|pane_id| {
-                        let placement = pane_placement(&tab.layout, pane_id);
-                        let row = if let Some(pane) = self.panes.get(&pane_id) {
+                        let mut row = if let Some(pane) = self.panes.get(&pane_id) {
                             let runtime = pane.terminal_runtime();
                             let status = self.status.get(&pane_id);
                             let agent_session_title = self.agent_session_title(pane_id);
@@ -202,7 +201,8 @@ impl App {
                                     && tab.layout.focus == pane_id,
                             })
                         };
-                        with_pane_placement(row, placement)
+                        insert_placement(&mut row, &tab.layout, pane_id);
+                        row
                     })
                     .collect();
                 tabs.push(json!({

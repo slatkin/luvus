@@ -93,7 +93,6 @@ impl App {
                         continue;
                     }
                     for id in tab.layout.all_panes() {
-                        let placement = pane_placement(&tab.layout, id);
                         let (agent, status) = self
                             .status
                             .get(&id)
@@ -109,30 +108,32 @@ impl App {
                             .module_panes
                             .get(&id)
                             .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
-                        panes.push(with_pane_placement(json!({
-                        "pane": id.0.to_string(), "agent": agent, "status": status,
-                        "workspace": workspace_index.to_string(), "workspace_id": workspace.id,
-                        "tab": (tab_index + 1).to_string(), "tab_id": tab.id,
-                        "focused": workspace_index == self.active_ws
-                            && tab_index == workspace.active_tab && id == tab.layout.focus,
-                        "cwd": cwd, "module": module,
-                        "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
-                        "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
-                        "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
-                        "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
-                        "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
-                        "history_cache_bytes": history.and_then(|m| m.cache_bytes),
-                        "history_compacted_rows": history.and_then(|m| m.compacted_rows),
-                        "history_allocated_cells": history.and_then(|m| m.allocated_cells),
-                        "history_packed_blocks": history.and_then(|m| m.packed_blocks),
-                        "history_packed_bytes": history.and_then(|m| m.packed_bytes),
-                        "history_packed_rows": history.and_then(|m| m.packed_rows),
-                        "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
-                        "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
-                        "history_allocation_count": history.and_then(|m| m.allocation_count),
-                        "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
-                        "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-                    }), placement));
+                        let mut row = json!({
+                            "pane": id.0.to_string(), "agent": agent, "status": status,
+                            "workspace": workspace_index.to_string(), "workspace_id": workspace.id,
+                            "tab": (tab_index + 1).to_string(), "tab_id": tab.id,
+                            "focused": workspace_index == self.active_ws
+                                && tab_index == workspace.active_tab && id == tab.layout.focus,
+                            "cwd": cwd, "module": module,
+                            "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
+                            "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
+                            "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
+                            "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                            "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
+                            "history_cache_bytes": history.and_then(|m| m.cache_bytes),
+                            "history_compacted_rows": history.and_then(|m| m.compacted_rows),
+                            "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                            "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                            "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                            "history_packed_rows": history.and_then(|m| m.packed_rows),
+                            "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                            "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                            "history_allocation_count": history.and_then(|m| m.allocation_count),
+                            "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                            "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
+                        });
+                        insert_placement(&mut row, &tab.layout, id);
+                        panes.push(row);
                     }
                 }
             }
@@ -362,35 +363,38 @@ impl App {
                 })
                 .unwrap_or_else(|| (String::new(), "unknown".to_string(), "none", "none"));
             let history = self.panes.get(&id).map(|p| p.history_metrics());
-            let placement = self
-                .pane_location(id)
-                .map(|(workspace, tab)| {
-                    pane_placement(&self.workspaces[workspace].tabs[tab].layout, id)
-                })
-                .unwrap_or_else(|| json!({"floating": false}));
-            Ok(with_pane_placement(
-                json!({
-                    "type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status,
-                    "authority":authority, "state_source":state_source,
-                    "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
-                    "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
-                    "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
-                    "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
-                    "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
-                    "history_cache_bytes": history.and_then(|m| m.cache_bytes),
-                    "history_compacted_rows": history.and_then(|m| m.compacted_rows),
-                    "history_allocated_cells": history.and_then(|m| m.allocated_cells),
-                    "history_packed_blocks": history.and_then(|m| m.packed_blocks),
-                    "history_packed_bytes": history.and_then(|m| m.packed_bytes),
-                    "history_packed_rows": history.and_then(|m| m.packed_rows),
-                    "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
-                    "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
-                    "history_allocation_count": history.and_then(|m| m.allocation_count),
-                    "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
-                    "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-                }),
-                placement,
-            ))
+            let mut row = json!({
+                "type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status,
+                "authority":authority, "state_source":state_source,
+                "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
+                "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
+                "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
+                "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
+                "history_cache_bytes": history.and_then(|m| m.cache_bytes),
+                "history_compacted_rows": history.and_then(|m| m.compacted_rows),
+                "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                "history_packed_rows": history.and_then(|m| m.packed_rows),
+                "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                "history_allocation_count": history.and_then(|m| m.allocation_count),
+                "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
+            });
+            // A pane without a location reports the same defaults as a tiled one.
+            match self.pane_location(id) {
+                Some((workspace, tab)) => {
+                    insert_placement(&mut row, &self.workspaces[workspace].tabs[tab].layout, id)
+                }
+                None => {
+                    if let Some(object) = row.as_object_mut() {
+                        object.insert("floating".to_string(), Value::Bool(false));
+                    }
+                }
+            }
+            Ok(row)
         }
     }
 
@@ -1796,27 +1800,25 @@ impl App {
         let terminal = self.panes.get(&pane);
         let status = self.status.get(&pane);
         let history = terminal.map(|pane| pane.history_metrics());
-        let placement = pane_placement(&self.workspaces[workspace].tabs[tab].layout, pane);
-        Ok(with_pane_placement(
-            json!({
-                "type":"pane", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
-                "workspace_id":self.workspaces[workspace].id,
-                "tab":(tab+1).to_string(), "tab_id":self.workspaces[workspace].tabs[tab].id,
-                "terminal_id":terminal.and_then(|pane| pane.terminal_runtime()).map(|runtime| runtime.terminal_id),
-                "focused":workspace == self.active_ws
-                    && tab == self.workspaces[workspace].active_tab
-                    && self.workspaces[workspace].tabs[tab].layout.focus == pane,
-                "name":self.agent_name_for(pane),
-                "cwd":terminal.map(|pane| pane.cwd.display().to_string()),
-                "command":terminal.map(|pane| pane.command.as_str()),
-                "agent":status.map(|status| status.agent.as_str()),
-                "status":status.map(|status| state_str(status.state)).unwrap_or("unknown"),
-                "history_budget_bytes":history.map(|metrics| metrics.budget_bytes),
-                "history_bytes":history.map(|metrics| metrics.retained_bytes),
-                "module":self.module_panes.get(&pane).map(|module| json!({"id":module.module_id,"entrypoint":module.entrypoint})),
-            }),
-            placement,
-        ))
+        let mut row = json!({
+            "type":"pane", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
+            "workspace_id":self.workspaces[workspace].id,
+            "tab":(tab+1).to_string(), "tab_id":self.workspaces[workspace].tabs[tab].id,
+            "terminal_id":terminal.and_then(|pane| pane.terminal_runtime()).map(|runtime| runtime.terminal_id),
+            "focused":workspace == self.active_ws
+                && tab == self.workspaces[workspace].active_tab
+                && self.workspaces[workspace].tabs[tab].layout.focus == pane,
+            "name":self.agent_name_for(pane),
+            "cwd":terminal.map(|pane| pane.cwd.display().to_string()),
+            "command":terminal.map(|pane| pane.command.as_str()),
+            "agent":status.map(|status| status.agent.as_str()),
+            "status":status.map(|status| state_str(status.state)).unwrap_or("unknown"),
+            "history_budget_bytes":history.map(|metrics| metrics.budget_bytes),
+            "history_bytes":history.map(|metrics| metrics.retained_bytes),
+            "module":self.module_panes.get(&pane).map(|module| json!({"id":module.module_id,"entrypoint":module.entrypoint})),
+        });
+        insert_placement(&mut row, &self.workspaces[workspace].tabs[tab].layout, pane);
+        Ok(row)
     }
 
     pub(in crate::app::dispatch) fn socket_pane_layout(

@@ -116,40 +116,29 @@ pub(in crate::app::dispatch) fn module_json(m: &crate::module::InstalledModule) 
 /// Placement fields for a pane projection. Every pane reports `floating`; a
 /// floating pane also reports its stored outer rect (pane-area cells) and its
 /// stacking position, where 0 is the top.
-pub(in crate::app::dispatch) fn pane_placement(
+pub(in crate::app::dispatch) fn insert_placement(
+    row: &mut Value,
     layout: &crate::layout::TileLayout,
     pane: PaneId,
-) -> Value {
-    if !layout.is_floating(pane) {
-        return json!({"floating": false});
-    }
-    let rects = layout.floating_rects();
-    let Some(z) = rects.iter().position(|(id, _)| *id == pane) else {
-        return json!({"floating": false});
+) {
+    let Some(object) = row.as_object_mut() else {
+        return;
     };
-    let rect = rects[z].1;
-    json!({
-        "floating": true,
-        "rect": rect_json(rect),
-        "z": z,
-    })
+    match layout.floating_position(pane) {
+        None => {
+            object.insert("floating".to_string(), Value::Bool(false));
+        }
+        Some((z, rect)) => {
+            object.insert("floating".to_string(), Value::Bool(true));
+            object.insert("rect".to_string(), rect_json(rect));
+            object.insert("z".to_string(), json!(z));
+        }
+    }
 }
 
 /// Public JSON shape of a pane rectangle.
 pub(in crate::app::dispatch) fn rect_json(rect: Rect) -> Value {
     json!({"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height})
-}
-
-/// Merge placement fields into an existing pane projection object.
-pub(in crate::app::dispatch) fn with_pane_placement(mut row: Value, placement: Value) -> Value {
-    if let (Some(object), Some(placement)) = (row.as_object_mut(), placement.as_object()) {
-        object.extend(
-            placement
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
-    }
-    row
 }
 
 pub(in crate::app::dispatch) fn process_executables(commands: &[String]) -> Vec<String> {

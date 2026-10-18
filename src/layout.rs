@@ -283,10 +283,25 @@ impl TileLayout {
     }
 
     /// Every pane in the tab: tiled leaves, then floating panes top first.
+    ///
+    /// Render paths should prefer [`Self::for_each_pane`], which visits the same
+    /// panes in the same order without allocating; keep this for callers that
+    /// need the collected list.
     pub fn all_panes(&self) -> Vec<PaneId> {
         let mut v = self.leaves();
         v.extend(self.floating.iter().rev().map(|(id, _)| *id));
         v
+    }
+
+    /// Visit every pane in the tab in [`Self::all_panes`] order: tiled leaves
+    /// left to right and top to bottom, then floating panes top first.
+    ///
+    /// Use this on render paths that only need to look at each pane once.
+    pub fn for_each_pane(&self, mut f: impl FnMut(PaneId)) {
+        for_each_leaf(&self.root, &mut f);
+        for (id, _) in self.floating.iter().rev() {
+            f(*id);
+        }
     }
 
     /// Stored floating pane rects, top first. Rects are relative to the tab's
@@ -796,6 +811,17 @@ fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
         Node::Split { a, b, .. } => {
             collect_leaves(a, out);
             collect_leaves(b, out);
+        }
+    }
+}
+
+/// Same visit order as [`collect_leaves`] without building the list.
+fn for_each_leaf(node: &Node, f: &mut impl FnMut(PaneId)) {
+    match node {
+        Node::Leaf(id) => f(*id),
+        Node::Split { a, b, .. } => {
+            for_each_leaf(a, f);
+            for_each_leaf(b, f);
         }
     }
 }
@@ -1436,6 +1462,12 @@ mod tests {
             .collect()
     }
 
+    fn visited_panes(layout: &TileLayout) -> Vec<PaneId> {
+        let mut seen = Vec::new();
+        layout.for_each_pane(|id| seen.push(id));
+        seen
+    }
+
     #[test]
     fn new_layout_has_no_floating_panes_and_tracks_tiled_focus() {
         let a = PaneId::alloc();
@@ -1477,6 +1509,11 @@ mod tests {
             "top first"
         );
         assert_eq!(layout.all_panes(), vec![a, b, third, second, first]);
+        assert_eq!(
+            visited_panes(&layout),
+            vec![a, b, third, second, first],
+            "for_each_pane visits all_panes order"
+        );
         assert_eq!(layout.len(), 5, "len counts tiled and floating panes");
         assert!(layout.is_floating(third));
         assert!(!layout.is_floating(a));
@@ -1490,6 +1527,7 @@ mod tests {
         assert!(!layout.contains(first));
         assert!(layout.contains(second));
         assert_eq!(layout.all_panes(), vec![a, b, third, second]);
+        assert_eq!(visited_panes(&layout), vec![a, b, third, second]);
         assert_eq!(layout.leaves(), vec![a, b]);
     }
 

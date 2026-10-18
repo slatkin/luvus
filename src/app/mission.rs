@@ -477,10 +477,13 @@ impl App {
             for (ti, tab) in workspace.tabs.iter().enumerate() {
                 // Floating panes run agents too, so Mission Control lists them
                 // after the tab's tiled panes.
-                let panes = tab.layout.all_panes();
-                for (pi, id) in panes.iter().copied().enumerate() {
+                let pane_count = tab.layout.len();
+                let mut pane_index = 0;
+                tab.layout.for_each_pane(|id| {
+                    let pi = pane_index;
+                    pane_index += 1;
                     let Some(s) = self.status.get(&id) else {
-                        continue;
+                        return;
                     };
                     if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
                         let usage = s
@@ -504,8 +507,8 @@ impl App {
                         } else {
                             tab_name
                         };
-                        if panes.len() > 1 {
-                            location.push_str(&format!(" p{}/{}", pi + 1, panes.len()));
+                        if pane_count > 1 {
+                            location.push_str(&format!(" p{}/{}", pi + 1, pane_count));
                         }
                         if let Some(task) =
                             self.orch.tasks.iter().find(|t| t.assignee == Some(id.0))
@@ -522,7 +525,7 @@ impl App {
                             blocked_hint: s.blocked_hint.clone(),
                         });
                     }
-                }
+                });
             }
         }
         // Sort live agents by attention so the ones that need you float to the top

@@ -22,12 +22,12 @@ pub(crate) fn rollup(app: &App, ws_index: usize) -> State {
     let mut best = State::Idle;
     if let Some(ws) = app.workspaces.get(ws_index) {
         for tab in &ws.tabs {
-            for id in tab.layout.all_panes() {
+            tab.layout.for_each_pane(|id| {
                 let s = pane_state(app, id);
                 if attention(s) > attention(best) {
                     best = s;
                 }
-            }
+            });
         }
     }
     best
@@ -639,19 +639,20 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     for (wi, ws) in app.workspaces.iter().enumerate() {
         let visible = !scoped || wi == app.active_ws;
         for tab in &ws.tabs {
-            for id in tab.layout.all_panes() {
-                if let Some(s) = app.status.get(&id) {
-                    let is_agent = app.manifests.is_agent(&s.agent) || s.agent_session.is_some();
-                    if !is_agent {
-                        continue;
-                    }
-                    if visible {
-                        live.push((id, ws.name.clone()));
-                    } else if s.state == State::Blocked {
-                        blocked_elsewhere.push(id);
-                    }
+            tab.layout.for_each_pane(|id| {
+                let Some(s) = app.status.get(&id) else {
+                    return;
+                };
+                let is_agent = app.manifests.is_agent(&s.agent) || s.agent_session.is_some();
+                if !is_agent {
+                    return;
                 }
-            }
+                if visible {
+                    live.push((id, ws.name.clone()));
+                } else if s.state == State::Blocked {
+                    blocked_elsewhere.push(id);
+                }
+            });
         }
     }
     // Pinned agents (right-click → Pin) float to the top; a stable sort keeps the

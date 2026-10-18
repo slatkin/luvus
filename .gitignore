@@ -10,6 +10,7 @@ homebrew-luvus/
 .claude/
 .agents/skills/
 tests/
+.pi
 
 # Local-only maintainer identity map (contains email; not for GitHub).
 .mailmap

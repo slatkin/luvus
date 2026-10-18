@@ -512,8 +512,7 @@ mod width_tests {
                 orch: false,
                 mission: false,
                 name: None,
-                floating_titles: std::collections::HashMap::new(),
-                last_cascade: None,
+                floating: crate::app::FloatingState::default(),
             });
         }
         app.workspaces[0].active_tab = 27;

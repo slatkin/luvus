@@ -650,7 +650,7 @@ impl App {
         self.validate_floating_target(workspace, tab)
             .map_err(|_| format!("module {module_id} cannot open a floating pane in this tab"))?;
         let area = self.split_area();
-        let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
+        let last_cascade = self.workspaces[workspace].tabs[tab].floating.last_cascade;
         let geometry = crate::layout::resolve_floating_geometry(
             area,
             entry.width,
@@ -714,7 +714,7 @@ impl App {
                     };
                     return Err(format!("cannot open floating module pane: {reason}"));
                 }
-                self.workspaces[workspace].tabs[tab].last_cascade = Some(geometry.cascade);
+                self.workspaces[workspace].tabs[tab].floating.last_cascade = Some(geometry.cascade);
             }
             _ => {
                 self.split_focused_auto(id);
@@ -1304,7 +1304,8 @@ command = ["sh", "prompt.sh"]
         assert!(!app.layout().leaves().contains(&pid));
         assert_eq!(
             app.workspaces[0].tabs[0]
-                .floating_titles
+                .floating
+                .titles
                 .get(&pid)
                 .map(String::as_str),
             Some("Pick a branch")

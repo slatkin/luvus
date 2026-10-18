@@ -560,6 +560,18 @@ pub struct PaneNavigation {
     pub pane_before_commander: PaneId,
 }
 
+/// Floating-pane state owned by one tab: presentation and creation policy,
+/// kept out of [`TileLayout`], which owns only geometry.
+#[derive(Default)]
+pub(crate) struct FloatingState {
+    /// Title overrides for this tab's floating panes, keyed by pane id. A
+    /// floating pane without an entry uses the normal pane title.
+    pub titles: HashMap<PaneId, String>,
+    /// Cascade cursor for the next floating pane without an explicit position.
+    /// `None` means the next pane starts at the first cascade position.
+    pub last_cascade: Option<(u16, u16)>,
+}
+
 pub struct Tab {
     /// Stable public identity. Positions remain the human-facing CLI locator;
     /// API integrations use this value across moves, swaps, and restarts.
@@ -580,12 +592,8 @@ pub struct Tab {
     /// User-chosen tab name (docs/28). `None` → the tab bar shows its number.
     /// Git/orch/mission tabs keep their fixed label and are never named.
     pub name: Option<String>,
-    /// Title overrides for this tab's floating panes, keyed by pane id. A
-    /// floating pane without an entry uses the normal pane title.
-    pub floating_titles: HashMap<PaneId, String>,
-    /// Cascade cursor for the next floating pane without an explicit position.
-    /// `None` means the next pane starts at the first cascade position.
-    pub last_cascade: Option<(u16, u16)>,
+    /// Floating-pane titles and cascade cursor for this tab.
+    pub floating: FloatingState,
 }
 
 impl Tab {
@@ -598,8 +606,7 @@ impl Tab {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         }
     }
 
@@ -628,10 +635,10 @@ impl Tab {
     /// detach a pane and leave stale floating state behind.
     pub(crate) fn remove_pane(&mut self, id: PaneId) -> bool {
         let emptied = self.layout.remove(id);
-        self.floating_titles.remove(&id);
+        self.floating.titles.remove(&id);
         if self.layout.floating_rects().is_empty() {
             // A fresh cascade starts again after the last floating pane.
-            self.last_cascade = None;
+            self.floating.last_cascade = None;
         }
         emptied
     }
@@ -3954,8 +3961,7 @@ impl App {
                             orch: false,
                             mission: false,
                             name: None,
-                            floating_titles: HashMap::new(),
-                            last_cascade: None,
+                            floating: FloatingState::default(),
                         });
                     }
                     continue;
@@ -3971,8 +3977,7 @@ impl App {
                         orch: true,
                         mission: false,
                         name: None,
-                        floating_titles: HashMap::new(),
-                        last_cascade: None,
+                        floating: FloatingState::default(),
                     });
                     continue;
                 }
@@ -3987,8 +3992,7 @@ impl App {
                         orch: false,
                         mission: true,
                         name: None,
-                        floating_titles: HashMap::new(),
-                        last_cascade: None,
+                        floating: FloatingState::default(),
                     });
                     continue;
                 }
@@ -5418,7 +5422,8 @@ impl App {
         let ws = self.workspaces.get(self.active_ws)?;
         ws.tabs
             .get(ws.active_tab)?
-            .floating_titles
+            .floating
+            .titles
             .get(&id)
             .map(String::as_str)
     }
@@ -5876,7 +5881,8 @@ impl App {
         layout.add_floating(pane_id, geometry);
         if let Some(title) = title {
             self.workspaces[workspace].tabs[tab]
-                .floating_titles
+                .floating
+                .titles
                 .insert(pane_id, title);
         }
         // Creating a floating pane in a zoomed tab unzooms it, even when the
@@ -5941,7 +5947,7 @@ impl App {
         self.validate_floating_target(workspace, tab)?;
 
         let area = self.split_area();
-        let last_cascade = self.workspaces[workspace].tabs[tab].last_cascade;
+        let last_cascade = self.workspaces[workspace].tabs[tab].floating.last_cascade;
         let geometry = crate::layout::resolve_floating_geometry(
             area,
             request.width,
@@ -5995,7 +6001,7 @@ impl App {
             self.close_pane(pane_id);
             return Err(error);
         }
-        self.workspaces[workspace].tabs[tab].last_cascade = Some(geometry.cascade);
+        self.workspaces[workspace].tabs[tab].floating.last_cascade = Some(geometry.cascade);
         Ok(FloatingPaneResult {
             pane: pane_id,
             workspace,

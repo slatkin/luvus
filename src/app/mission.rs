@@ -243,8 +243,7 @@ impl App {
             orch: false,
             mission: true,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;

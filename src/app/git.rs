@@ -78,8 +78,7 @@ impl App {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;
@@ -1193,8 +1192,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -1283,8 +1281,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
         let git_tab = app.ws().active_tab;
@@ -1355,8 +1352,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
         let tabs_before = app.ws().tabs.len();
@@ -1411,8 +1407,7 @@ mod tests {
             orch: true,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         let orch_tab = 1usize;
         app.workspaces[0].tabs.push(Tab {
@@ -1422,8 +1417,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -1456,8 +1450,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -1509,8 +1502,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -1574,8 +1566,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
         // Default is Open (open PRs/issues, like before).
@@ -1618,8 +1609,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -1660,8 +1650,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -1715,8 +1704,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -1823,8 +1811,7 @@ mod tests {
                 orch: false,
                 mission: false,
                 name: None,
-                floating_titles: HashMap::new(),
-                last_cascade: None,
+                floating: FloatingState::default(),
             });
             app.workspaces[workspace].active_tab = app.workspaces[workspace].tabs.len() - 1;
         }
@@ -1897,8 +1884,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -2099,8 +2085,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
         assert!(app.active_is_git());
@@ -2155,8 +2140,7 @@ mod tests {
             orch: false,
             mission: false,
             name: None,
-            floating_titles: HashMap::new(),
-            last_cascade: None,
+            floating: FloatingState::default(),
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 

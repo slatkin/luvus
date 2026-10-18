@@ -22194,6 +22194,28 @@ fi
     }
 
     #[test]
+    fn a_floating_size_the_tiny_pane_area_clamps_below_the_minimum_spawns_nothing() {
+        let _env = crate::persist::test_env("floating-tiny-area");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // A valid explicit size in a pane area smaller than the 3x3 minimum:
+        // the clamped rect is not attachable, so the size gate rejects it
+        // before any PTY exists.
+        app.last_pane_area = Rect::new(0, 0, 2, 2);
+        let before = app.panes.len();
+        let mut request = FloatingPaneRequest::test(None, None, None, true, None);
+        request.width = Some(20);
+        request.height = Some(8);
+
+        assert_eq!(
+            app.float_pane(request).unwrap_err(),
+            FloatingPaneError::InvalidGeometry
+        );
+        assert_eq!(app.panes.len(), before, "no PTY is spawned");
+        assert!(app.layout().floating_rects().is_empty());
+    }
+
+    #[test]
     fn creating_a_floating_pane_without_focus_keeps_the_focused_pane() {
         let _env = crate::persist::test_env("floating-create-no-focus");
         let (tx, _rx) = mpsc::channel();

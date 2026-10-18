@@ -149,7 +149,9 @@ pub struct FloatGeometry {
 ///
 /// Missing `width`/`height` use [`default_floating_size`]; missing `x`/`y`
 /// cascade from `last` like [`cascade_floating_position`]. Returns `None` when
-/// the resulting size is below [`MIN_FLOATING`]. The rect is clamped to `area`.
+/// the requested size is below [`MIN_FLOATING`], and when the rect clamped to
+/// `area` still ends up below it (only possible when the pane area itself is
+/// smaller than [`MIN_FLOATING`]). The rect is clamped to `area`.
 pub fn resolve_floating_geometry(
     area: Rect,
     width: Option<u16>,
@@ -171,8 +173,16 @@ pub fn resolve_floating_geometry(
             (x.unwrap_or(cx), y.unwrap_or(cy))
         }
     };
+    let rect = clamp_floating_rect(Rect::new(x, y, width, height), area);
+    // `clamp_floating_rect` keeps the minimum as its floor unless the area is
+    // smaller, so a valid request only lands below it when the pane area is
+    // under `MIN_FLOATING` on some axis. Reject that here, before any spawn, so
+    // a stored floating rect is always attachable.
+    if !floating_size_valid(rect.width, rect.height) {
+        return None;
+    }
     Some(FloatGeometry {
-        rect: clamp_floating_rect(Rect::new(x, y, width, height), area),
+        rect,
         cascade: (x, y),
     })
 }
@@ -1747,6 +1757,21 @@ mod tests {
             resolve_floating_geometry(area, Some(2), None, None, None, None),
             None,
             "a requested size below the minimum is rejected"
+        );
+    }
+
+    #[test]
+    fn a_valid_request_clamped_below_the_minimum_is_rejected() {
+        let tiny = Rect::new(0, 0, 2, 2);
+        assert_eq!(
+            resolve_floating_geometry(tiny, Some(20), Some(8), None, None, None),
+            None,
+            "the area itself is smaller than the minimum, so the clamped rect is not attachable"
+        );
+        assert_eq!(
+            resolve_floating_geometry(Rect::new(0, 0, 2, 40), Some(20), Some(8), None, None, None),
+            None,
+            "one short axis is enough to reject the clamped rect"
         );
     }
 

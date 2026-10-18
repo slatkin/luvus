@@ -90,6 +90,8 @@ panes / agents:
   pane list [--all-tabs]     list panes across every workspace and tab
   pane list --current-tab    list panes and read-only history metrics in the current tab
   pane split [<id>] [--auto|--right|--down] [--no-focus] [--cwd <path>]   split a pane (default: auto by size, creates a workspace if empty)
+  pane float [<id>] [--width N] [--height N] [--x N] [--y N] [--title T] [--no-focus] [-- <cmd...>]   open a floating pane above the tab
+                             defaults to the shell; everything after -- is the command argv
   pane transpose [<id>]     transpose the nearest split without changing focus
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
@@ -182,7 +184,7 @@ modules (extensions):
                              <id> is a module id or the owner/repo it came from
   module actions             list every action across modules
   module run <id> <action>   invoke a module action (captures + logs output)
-  module pane open <id> <entrypoint> [--placement split|overlay|tab]
+  module pane open <id> <entrypoint> [--placement split|overlay|tab|floating]
   module pane focus <pane> | close <pane>
   module log [<id>]          tail module command logs (--limit N)
   module config-dir <id>     print/create a module's config dir
@@ -341,6 +343,20 @@ root-first mode. Relative paths resolve against the CLI caller's current directo
 The server requires a non-empty absolute path of at most 4096 bytes that names
 an existing directory. If it disappears before spawning, Luvus retries the target
 workspace root and then the home directory.
+
+`pane float [<id>]` opens a pane that floats above the tab's tiled layout
+without changing that layout. It creates a workspace when none exists and
+otherwise uses the target pane's tab, or the active tab when no target is given.
+`--width`, `--height`, `--x`, and `--y` set the outer rectangle in cells; width
+and height must be at least 3, and omitted values use the default half-by-quarter
+size and cascade. `--title` sets the border title, which is limited to 64
+characters. The command is the default shell unless text follows `--`.
+`--no-focus` leaves focus where it is; otherwise the new pane takes focus and
+moves to the top. Floating panes are overlays:
+`pane split`, `pane transpose`, `pane move`, and `pane resize` reject a floating
+pane, while `pane close`, `pane focus`, `pane read`, `pane send`, and `pane run`
+work as usual. A tab still closes when its last tiled pane closes, and its
+floating panes close with it.
 
 `luvus uhp capabilities` on the owner endpoint reports supported methods. The same RPC through paired `luvus uhp access` adds `access.mode`, `access.allowed_methods`, and gateway connection/request limits; use that effective set for permission-aware clients.
 

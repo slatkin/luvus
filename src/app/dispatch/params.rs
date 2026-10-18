@@ -6,6 +6,11 @@ pub(in crate::app::dispatch) fn not_found() -> (String, String) {
     ("not_found".to_string(), "pane not found".to_string())
 }
 
+/// Request error for a parameter that fails validation.
+pub(in crate::app::dispatch) fn invalid(message: &str) -> (String, String) {
+    ("invalid_request".to_string(), message.to_string())
+}
+
 /// Fence prompt submission to the PTY lifetime the caller observed. Pane IDs
 /// can be reused after a server restart, while terminal IDs cannot.
 pub(in crate::app::dispatch) fn check_agent_terminal_id(
@@ -40,6 +45,7 @@ pub(in crate::app::dispatch) fn check_agent_terminal_id(
 pub(in crate::app::dispatch) fn pane_move_error(err: PaneMoveError) -> (String, String) {
     let message = match err {
         PaneMoveError::PaneNotFound => "pane not found",
+        PaneMoveError::FloatingPane => "pane is floating",
         PaneMoveError::SourceNotPaneTab => "source pane is not in a normal pane tab",
         PaneMoveError::TargetOutOfRange => "destination tab is out of range",
         PaneMoveError::SameTab => "source and destination tabs must differ",
@@ -100,9 +106,37 @@ pub(in crate::app::dispatch) fn workspace_update_error(
     }
 }
 
+/// The tiled-only pane commands share one rejection for a floating target.
+pub(in crate::app::dispatch) fn floating_pane_rejection() -> (String, String) {
+    (
+        "invalid_request".to_string(),
+        "pane is floating".to_string(),
+    )
+}
+
+pub(in crate::app::dispatch) fn floating_pane_error(err: FloatingPaneError) -> (String, String) {
+    let minimum = crate::layout::MIN_FLOATING;
+    match err {
+        FloatingPaneError::PaneNotFound => ("not_found".to_string(), "pane not found".to_string()),
+        FloatingPaneError::TargetNotPaneTab => (
+            "invalid_request".to_string(),
+            "target tab does not accept floating panes".to_string(),
+        ),
+        FloatingPaneError::InvalidGeometry => (
+            "invalid_request".to_string(),
+            format!("floating pane size must be at least {minimum} by {minimum}"),
+        ),
+        FloatingPaneError::SpawnFailed => (
+            "spawn_failed".to_string(),
+            "could not create a terminal in the home directory".to_string(),
+        ),
+    }
+}
+
 pub(in crate::app::dispatch) fn agent_fork_error(err: AgentForkError) -> (String, String) {
     let (code, message) = match err {
         AgentForkError::PaneNotFound => ("not_found", "agent pane not found"),
+        AgentForkError::FloatingPane => ("invalid_request", "pane is floating"),
         AgentForkError::SourceNotPaneTab => {
             ("invalid_request", "agent pane is not in a normal pane tab")
         }
@@ -426,20 +460,48 @@ pub(in crate::app::dispatch) fn required_index_param(
         .ok_or_else(|| ("invalid_request".to_string(), format!("{key} is required")))
 }
 
+/// Parse a JSON unsigned integer or a numeric string as `u64`.
+///
+/// Negative numbers, fractions, and non-numeric strings fail. Callers narrow
+/// the result to their target width with `TryFrom`.
+fn numeric_string_or_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
 pub(in crate::app::dispatch) fn parse_u32_value(
     value: &Value,
     key: &str,
 ) -> Result<u32, (String, String)> {
-    value
-        .as_u64()
+    numeric_string_or_u64(value)
         .and_then(|value| u32::try_from(value).ok())
-        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
         .ok_or_else(|| {
             (
                 "invalid_request".to_string(),
                 format!("{key} must be a pane id"),
             )
         })
+}
+
+/// Optional non-negative cell coordinate or size. Numbers and numeric strings
+/// are accepted, like pane ids; anything outside `u16` is a request error.
+pub(in crate::app::dispatch) fn optional_u16_param(
+    p: &Value,
+    key: &str,
+) -> Result<Option<u16>, (String, String)> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => numeric_string_or_u64(value)
+            .and_then(|value| u16::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                (
+                    "invalid_request".to_string(),
+                    format!("{key} must be an integer between 0 and 65535"),
+                )
+            }),
+    }
 }
 
 pub(in crate::app::dispatch) fn optional_workspace_param(
@@ -479,6 +541,24 @@ pub(in crate::app::dispatch) fn optional_u32(
     match p.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => parse_u32_value(value, key).map(Some),
+    }
+}
+
+/// Optional boolean flag. Absent or `null` keeps the method's documented
+/// default; any other non-boolean value is a request error instead of a silent
+/// default, so a typo cannot quietly change where focus goes.
+pub(in crate::app::dispatch) fn optional_bool_param(
+    p: &Value,
+    key: &str,
+    default: bool,
+) -> Result<bool, (String, String)> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err((
+            "invalid_request".to_string(),
+            format!("{key} must be a boolean"),
+        )),
     }
 }
 
@@ -873,4 +953,162 @@ pub(in crate::app::dispatch) fn parse_reported_usage(
         value: usage,
         updated_at,
     })
+}
+
+#[cfg(test)]
+mod bool_param_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn optional_bool_param_keeps_the_default_and_rejects_other_types() {
+        assert_eq!(optional_bool_param(&json!({}), "focus", true), Ok(true));
+        assert_eq!(optional_bool_param(&json!({}), "focus", false), Ok(false));
+        assert_eq!(
+            optional_bool_param(&json!({"focus": null}), "focus", true),
+            Ok(true)
+        );
+        assert_eq!(
+            optional_bool_param(&json!({"focus": true}), "focus", false),
+            Ok(true)
+        );
+        assert_eq!(
+            optional_bool_param(&json!({"focus": false}), "focus", true),
+            Ok(false)
+        );
+        for value in [json!(0), json!(1), json!("false"), json!("true"), json!([])] {
+            assert_eq!(
+                optional_bool_param(&json!({"focus": value}), "focus", true),
+                Err((
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                )),
+                "value: {value}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod numeric_param_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn numeric_core_accepts_unsigned_numbers_and_numeric_strings() {
+        assert_eq!(numeric_string_or_u64(&json!(0)), Some(0));
+        assert_eq!(numeric_string_or_u64(&json!(u64::MAX)), Some(u64::MAX));
+        assert_eq!(numeric_string_or_u64(&json!("42")), Some(42));
+        assert_eq!(numeric_string_or_u64(&json!("+42")), Some(42));
+        assert_eq!(numeric_string_or_u64(&json!("000042")), Some(42));
+        assert_eq!(
+            numeric_string_or_u64(&json!("18446744073709551615")),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn numeric_core_rejects_negative_fractional_and_non_numeric_inputs() {
+        for value in [
+            json!(-1),
+            json!(1.5),
+            json!(null),
+            json!(true),
+            json!(""),
+            json!("-1"),
+            json!("1.5"),
+            json!("wide"),
+            json!(" 42"),
+            json!("18446744073709551616"),
+        ] {
+            assert_eq!(numeric_string_or_u64(&value), None, "value: {value}");
+        }
+    }
+
+    #[test]
+    fn pane_id_parsing_narrows_to_u32_with_unchanged_error_text() {
+        assert_eq!(parse_u32_value(&json!(7), "pane"), Ok(7));
+        assert_eq!(parse_u32_value(&json!(u32::MAX), "pane"), Ok(u32::MAX));
+        assert_eq!(parse_u32_value(&json!("7"), "pane"), Ok(7));
+        assert_eq!(parse_u32_value(&json!("4294967295"), "pane"), Ok(u32::MAX));
+
+        for value in [
+            json!(u32::MAX as u64 + 1),
+            json!("4294967296"),
+            json!("18446744073709551615"),
+            json!("18446744073709551616"),
+            json!(-1),
+            json!("-1"),
+            json!(1.5),
+            json!("1.5"),
+            json!("wide"),
+            json!(null),
+        ] {
+            assert_eq!(
+                parse_u32_value(&value, "focus"),
+                Err((
+                    "invalid_request".to_string(),
+                    "focus must be a pane id".to_string()
+                )),
+                "value: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_cell_coordinates_pin_u16_bounds_and_error_text() {
+        assert_eq!(optional_u16_param(&json!({}), "x"), Ok(None));
+        assert_eq!(optional_u16_param(&json!({ "x": null }), "x"), Ok(None));
+
+        for (value, expected) in [
+            (json!(0), 0),
+            (json!(u16::MAX), u16::MAX),
+            (json!("0"), 0),
+            (json!("65535"), u16::MAX),
+        ] {
+            assert_eq!(
+                optional_u16_param(&json!({ "x": value }), "x"),
+                Ok(Some(expected)),
+                "value: {value}"
+            );
+        }
+
+        for value in [
+            json!(u16::MAX as u64 + 1),
+            json!("65536"),
+            json!("4294967296"),
+            json!("18446744073709551616"),
+            json!(-1),
+            json!("-1"),
+            json!(1.5),
+            json!("wide"),
+        ] {
+            assert_eq!(
+                optional_u16_param(&json!({ "x": value }), "x"),
+                Err((
+                    "invalid_request".to_string(),
+                    "x must be an integer between 0 and 65535".to_string()
+                )),
+                "value: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_u32_delegates_and_keeps_pane_id_error_text() {
+        assert_eq!(optional_u32(&json!({}), "ahead"), Ok(None));
+        assert_eq!(optional_u32(&json!({ "ahead": null }), "ahead"), Ok(None));
+        assert_eq!(optional_u32(&json!({ "ahead": 12 }), "ahead"), Ok(Some(12)));
+        assert_eq!(
+            optional_u32(&json!({ "ahead": "12" }), "ahead"),
+            Ok(Some(12))
+        );
+        assert_eq!(
+            optional_u32(&json!({ "ahead": 4294967296_u64 }), "ahead"),
+            Err((
+                "invalid_request".to_string(),
+                "ahead must be a pane id".to_string()
+            ))
+        );
+    }
 }

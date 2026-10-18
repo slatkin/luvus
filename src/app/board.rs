@@ -151,6 +151,7 @@ impl App {
             orch: true,
             mission: false,
             name: None,
+            floating: FloatingState::default(),
         });
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;
@@ -756,6 +757,21 @@ impl App {
         })
     }
 
+    /// The tab's live pane used for task identity: the first tiled pane, then a
+    /// floating pane. Orchestration binds a task to a tab rather than a pane,
+    /// so a floating pane is a valid worker target, but the tiled worker pane
+    /// always wins when the tab has one.
+    fn live_pane_in_tab(&self, workspace: usize, tab: usize) -> Option<PaneId> {
+        self.workspaces
+            .get(workspace)?
+            .tabs
+            .get(tab)?
+            .layout
+            .all_panes()
+            .into_iter()
+            .find(|pane| self.panes.contains_key(pane))
+    }
+
     /// Prepare a shared-workspace worker without claiming the task yet.
     fn start_task_workspace(
         &mut self,
@@ -777,11 +793,7 @@ impl App {
                         })?
                     })
                 {
-                    let pane = self.workspaces[workspace].tabs[tab]
-                        .layout
-                        .leaves()
-                        .into_iter()
-                        .find(|pane| self.panes.contains_key(pane));
+                    let pane = self.live_pane_in_tab(workspace, tab);
                     if let Some(pane) = pane {
                         self.focus_pane_global(pane);
                         return Ok(PreparedTaskStart {
@@ -1061,7 +1073,7 @@ impl App {
             .flat_map(|workspace| {
                 workspace.tabs.iter().filter_map(|tab| {
                     tab.layout
-                        .leaves()
+                        .all_panes()
                         .into_iter()
                         .find(|pane| self.panes.contains_key(pane))
                         .map(|pane| (workspace.id.clone(), tab.id.clone(), pane.0))
@@ -1595,6 +1607,7 @@ impl App {
     pub fn close_orch_board(&mut self) {
         let at = self.ws().active_tab;
         if self.ws().tabs.get(at).is_some_and(Tab::is_orch) {
+            self.ws().tabs[at].debug_assert_no_floating("ORCH");
             let ws = &mut self.workspaces[self.active_ws];
             ws.tabs.remove(at);
             if ws.tabs.is_empty() {
@@ -1716,7 +1729,7 @@ impl App {
     fn active_agent_automation_choices(&self) -> Vec<crate::app::OrchActiveAgent> {
         let mut choices = Vec::new();
         for workspace in &self.workspaces {
-            for pane in workspace.tabs.iter().flat_map(|tab| tab.layout.leaves()) {
+            for pane in workspace.tabs.iter().flat_map(|tab| tab.layout.all_panes()) {
                 let Some(status) = self.status.get(&pane).filter(|_| self.is_agent_pane(pane))
                 else {
                     continue;
@@ -3742,6 +3755,151 @@ mod tests {
         assert_eq!(app.orch.task("t1").unwrap().status, TaskStatus::Queued);
     }
 
+    /// A floating pane with a live terminal, for the orchestration identity
+    /// scans. Floating panes run agents but never host a split anchor.
+    fn add_floating_pane(app: &mut App) -> PaneId {
+        let shell = crate::platform::resolve_shell(&app.config.shell);
+        app.float_pane(crate::app::FloatingPaneRequest {
+            target: None,
+            width: Some(20),
+            height: Some(6),
+            x: Some(4),
+            y: Some(2),
+            title: None,
+            focus: false,
+            command: Some(vec![shell]),
+        })
+        .expect("floating pane spawns")
+        .pane
+    }
+
+    #[test]
+    fn task_start_reuse_keeps_the_tiled_worker_under_a_floating_agent() {
+        let _env = crate::persist::test_env("orch-start-reuse-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let worker = app.layout().focus;
+        let floating = add_floating_pane(&mut app);
+        app.status.get_mut(&floating).unwrap().agent = "codex".into();
+        let workspace_id = app.ws().id.clone();
+        let tab_id = app.ws().tabs[app.ws().active_tab].id.clone();
+        let root = app.ws().cwd.display().to_string();
+        app.orch
+            .add_task("reuse".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch.bind_workspace(
+            "t1",
+            WorkspaceWorkerBinding {
+                workspace_id,
+                tab_id,
+                root,
+            },
+        );
+
+        let started = app
+            .task_start_impl_with_submit(
+                "t1",
+                None,
+                Some("codex".into()),
+                TaskWorkerMode::Workspace,
+                None,
+                None,
+                |_pane, _line| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(started.pane, worker, "the tab's tiled worker is reused");
+        assert!(
+            app.is_floating_pane(floating),
+            "the floating pane stays put"
+        );
+        assert!(
+            app.panes.contains_key(&floating),
+            "the floating agent stays alive"
+        );
+    }
+
+    #[test]
+    fn task_start_reuse_can_take_a_floating_agent_without_a_live_tiled_pane() {
+        let _env = crate::persist::test_env("orch-start-reuse-floating-only");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = add_floating_pane(&mut app);
+        // A restored task tab can outlive its saved pane id. Model that with a
+        // tree leaf that no live pane owns, plus the floating agent.
+        let mut layout = TileLayout::new(PaneId::alloc());
+        app.workspaces[0].tabs[0].layout.remove(floating);
+        layout.add_floating(floating, ratatui::layout::Rect::new(4, 2, 20, 6));
+        app.workspaces[0].tabs.push(Tab::panes(layout));
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+        app.status.get_mut(&floating).unwrap().agent = "codex".into();
+        let tab_index = app.workspaces[0].active_tab;
+        assert_eq!(app.live_pane_in_tab(0, tab_index), Some(floating));
+
+        let workspace_id = app.ws().id.clone();
+        let tab_id = app.ws().tabs[tab_index].id.clone();
+        let root = app.ws().cwd.display().to_string();
+        app.orch
+            .add_task("float reuse".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch.bind_workspace(
+            "t1",
+            WorkspaceWorkerBinding {
+                workspace_id,
+                tab_id,
+                root,
+            },
+        );
+
+        let started = app
+            .task_start_impl_with_submit(
+                "t1",
+                None,
+                Some("codex".into()),
+                TaskWorkerMode::Workspace,
+                None,
+                None,
+                |_pane, _line| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(started.pane, floating, "the floating agent is reused");
+        assert_eq!(app.orch.task("t1").unwrap().assignee, Some(floating.0));
+    }
+
+    #[test]
+    fn workspace_tab_lookup_keeps_the_tiled_worker_when_a_floating_pane_exists() {
+        let _env = crate::persist::test_env("orch-reconcile-floating");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let worker = app.layout().focus;
+        let floating = add_floating_pane(&mut app);
+        assert!(app.panes.contains_key(&floating));
+        let workspace_id = app.ws().id.clone();
+        let tab_id = app.ws().tabs[app.ws().active_tab].id.clone();
+        let root = app.ws().cwd.display().to_string();
+        app.orch
+            .add_task("reconcile".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch.claim("t1", 9999).unwrap();
+        app.orch.bind_workspace(
+            "t1",
+            WorkspaceWorkerBinding {
+                workspace_id,
+                tab_id,
+                root,
+            },
+        );
+
+        app.orch_reconcile();
+
+        assert_eq!(
+            app.orch.task("t1").unwrap().assignee,
+            Some(worker.0),
+            "the tiled pane anchors the task, not the floating pane"
+        );
+    }
+
     #[test]
     fn post_submit_failure_releases_claim_and_prepared_resources() {
         let _env = crate::persist::test_env("orch-start-finalize-rollback");
@@ -5291,6 +5449,35 @@ mod tests {
             form.automation_target,
             crate::app::OrchAutomationTarget::ActiveAgent
         );
+    }
+
+    #[test]
+    fn automation_form_offers_a_floating_agent_as_a_reusable_target() {
+        let _env = crate::persist::test_env("orch-form-floating-agent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = add_floating_pane(&mut app);
+        app.status.get_mut(&floating).unwrap().agent = "codex".into();
+        let terminal_id = app.panes[&floating]
+            .terminal_runtime()
+            .map(|runtime| runtime.terminal_id)
+            .expect("the floating pane has a terminal lifetime");
+        app.orch_view = crate::app::OrchView::Automations;
+        app.open_orch_form();
+
+        let form = app.orch_form.as_ref().unwrap();
+        assert_eq!(
+            form.active_agents.len(),
+            1,
+            "the floating agent is a choice"
+        );
+        assert_eq!(form.active_agents[0].pane, floating);
+        assert_eq!(form.active_agents[0].agent, "codex");
+        assert_eq!(
+            form.active_agents[0].terminal_id, terminal_id,
+            "the choice binds the floating pane's terminal lifetime"
+        );
+        assert_eq!(form.active_agents[0].workspace_id, app.ws().id);
     }
 
     #[test]

@@ -179,14 +179,13 @@ impl App {
         workspace_cwd: &std::path::Path,
         leaves: &[PaneId],
     ) -> Option<usize> {
-        if self.workspaces.get(workspace)?.cwd != workspace_cwd {
+        let ws = self.workspaces.get(workspace)?;
+        if ws.cwd != *workspace_cwd {
             return None;
         }
-        self.resolve_tab_menu_target(&super::TabMenuTarget {
-            workspace,
-            leaves: leaves.to_vec(),
-        })
-        .map(|(_, tab)| tab)
+        ws.tabs
+            .iter()
+            .position(|tab| tab.layout.all_panes() == leaves)
     }
 
     fn search_recent_files(&self) -> Vec<SearchEntry> {
@@ -277,11 +276,11 @@ impl App {
                         ws: wi,
                         tab: ti,
                         workspace_cwd: ws.cwd.clone(),
-                        tab_leaves: tab.layout.leaves(),
+                        tab_leaves: tab.layout.all_panes(),
                     },
                     wi == self.active_ws && ti == ws.active_tab,
                 ));
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     let Some(pane) = self.panes.get(&id) else {
                         continue;
                     };
@@ -461,7 +460,7 @@ impl App {
         let mut targets = Vec::new();
         for ws in &self.workspaces {
             for (ti, tab) in ws.tabs.iter().enumerate() {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     let Some(pane) = self.panes.get(&id) else {
                         continue;
                     };
@@ -732,7 +731,7 @@ impl App {
         let mut total = 0usize;
         for (wi, ws) in self.workspaces.iter().enumerate() {
             for tab in &ws.tabs {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     let Some(pane) = self.panes.get(&id) else {
                         continue;
                     };

@@ -51,10 +51,11 @@ impl App {
             let pane = self.resolve_pane_or_focus(p)?;
             let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
             let area = crate::api::topology::logical_area();
-            let rect = self.workspaces[workspace].tabs[tab]
-                .layout
-                .pane_rect(area, pane)
-                .ok_or_else(not_found)?;
+            let layout = &self.workspaces[workspace].tabs[tab].layout;
+            // A floating pane has no tree rect; its edges answer for the last
+            // focused tiled pane, as `pane.neighbor` does.
+            let query = layout.tiled_anchor(pane);
+            let rect = layout.pane_rect(area, query).ok_or_else(not_found)?;
             Ok(
                 json!({"type":"pane_edges","pane":pane.0.to_string(),"edges":{
                     "left":rect.x == area.x, "right":rect.right() == area.right(),
@@ -91,7 +92,7 @@ impl App {
                     if tab.is_git() || tab.is_orch() || tab.is_mission() {
                         continue;
                     }
-                    for id in tab.layout.leaves() {
+                    for id in tab.layout.all_panes() {
                         let (agent, status) = self
                             .status
                             .get(&id)
@@ -107,30 +108,32 @@ impl App {
                             .module_panes
                             .get(&id)
                             .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
-                        panes.push(json!({
-                        "pane": id.0.to_string(), "agent": agent, "status": status,
-                        "workspace": workspace_index.to_string(), "workspace_id": workspace.id,
-                        "tab": (tab_index + 1).to_string(), "tab_id": tab.id,
-                        "focused": workspace_index == self.active_ws
-                            && tab_index == workspace.active_tab && id == tab.layout.focus,
-                        "cwd": cwd, "module": module,
-                        "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
-                        "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
-                        "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
-                        "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
-                        "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
-                        "history_cache_bytes": history.and_then(|m| m.cache_bytes),
-                        "history_compacted_rows": history.and_then(|m| m.compacted_rows),
-                        "history_allocated_cells": history.and_then(|m| m.allocated_cells),
-                        "history_packed_blocks": history.and_then(|m| m.packed_blocks),
-                        "history_packed_bytes": history.and_then(|m| m.packed_bytes),
-                        "history_packed_rows": history.and_then(|m| m.packed_rows),
-                        "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
-                        "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
-                        "history_allocation_count": history.and_then(|m| m.allocation_count),
-                        "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
-                        "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-                    }));
+                        let mut row = json!({
+                            "pane": id.0.to_string(), "agent": agent, "status": status,
+                            "workspace": workspace_index.to_string(), "workspace_id": workspace.id,
+                            "tab": (tab_index + 1).to_string(), "tab_id": tab.id,
+                            "focused": workspace_index == self.active_ws
+                                && tab_index == workspace.active_tab && id == tab.layout.focus,
+                            "cwd": cwd, "module": module,
+                            "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
+                            "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
+                            "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
+                            "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                            "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
+                            "history_cache_bytes": history.and_then(|m| m.cache_bytes),
+                            "history_compacted_rows": history.and_then(|m| m.compacted_rows),
+                            "history_allocated_cells": history.and_then(|m| m.allocated_cells),
+                            "history_packed_blocks": history.and_then(|m| m.packed_blocks),
+                            "history_packed_bytes": history.and_then(|m| m.packed_bytes),
+                            "history_packed_rows": history.and_then(|m| m.packed_rows),
+                            "history_dense_row_bytes": history.and_then(|m| m.dense_row_bytes),
+                            "history_row_descriptor_bytes": history.and_then(|m| m.row_descriptor_bytes),
+                            "history_allocation_count": history.and_then(|m| m.allocation_count),
+                            "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                            "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
+                        });
+                        insert_placement(&mut row, &tab.layout, id);
+                        panes.push(row);
                     }
                 }
             }
@@ -185,27 +188,9 @@ impl App {
                 None | Some(Value::Null) => self.layout().focus,
                 Some(_) => self.resolve_pane(p)?.ok_or_else(not_found)?,
             };
-            let axis = match p.get("direction") {
-                None | Some(Value::Null) => self.auto_split_axis_for(base),
-                Some(Value::String(dir)) => match dir.as_str() {
-                    "auto" => self.auto_split_axis_for(base),
-                    "down" | "stack" => Axis::Row,
-                    "right" => Axis::Col,
-                    _ => {
-                        return Err((
-                            "invalid_request".to_string(),
-                            "direction must be auto, right, or down".to_string(),
-                        ))
-                    }
-                },
-                Some(_) => {
-                    return Err((
-                        "invalid_request".to_string(),
-                        "direction must be auto, right, or down".to_string(),
-                    ))
-                }
-            };
-            let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
+            self.require_tiled_api(base)?;
+            let axis = split_axis(self, p, base)?;
+            let focus = optional_bool_param(p, "focus", true)?;
             let new = self
                 .split_pane_in(base, axis, focus, cwd)
                 .ok_or_else(not_found)?;
@@ -217,6 +202,46 @@ impl App {
                 "tab": (tab + 1).to_string(),
             }))
         }
+    }
+
+    /// Create a floating pane in the target pane's tab, or in the active tab
+    /// when no target is given. Every parameter is validated before the app
+    /// mutates state or spawns a PTY.
+    pub(super) fn api_pane_float(&mut self, p: &Value) -> DispatchResult {
+        reject_api_fields(
+            p,
+            &[
+                "pane", "width", "height", "x", "y", "title", "focus", "command",
+            ],
+        )?;
+        let request = self.floating_pane_request(p)?;
+        let result = self.float_pane(request).map_err(floating_pane_error)?;
+        Ok(json!({
+            "type":"pane",
+            "pane": result.pane.0.to_string(),
+            "workspace": result.workspace.to_string(),
+            "tab": (result.tab + 1).to_string(),
+        }))
+    }
+
+    /// Validate every `pane.float` parameter, so an invalid request never
+    /// mutates state or spawns a PTY.
+    fn floating_pane_request(&self, p: &Value) -> Result<FloatingPaneRequest, (String, String)> {
+        let target = match p.get("pane") {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(self.resolve_pane(p)?.ok_or_else(not_found)?),
+        };
+        Ok(FloatingPaneRequest {
+            target,
+            width: floating_dimension(p, "width")?,
+            height: floating_dimension(p, "height")?,
+            x: optional_u16_param(p, "x")?,
+            y: optional_u16_param(p, "y")?,
+            title: optional_bounded_string(p, "title", MAX_FLOATING_TITLE_CHARS)?,
+            // Absent or `null` means the new pane takes focus.
+            focus: optional_bool_param(p, "focus", true)?,
+            command: floating_command(p)?,
+        })
     }
 
     pub(super) fn api_pane_move(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -338,7 +363,7 @@ impl App {
                 })
                 .unwrap_or_else(|| (String::new(), "unknown".to_string(), "none", "none"));
             let history = self.panes.get(&id).map(|p| p.history_metrics());
-            Ok(json!({
+            let mut row = json!({
                 "type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status,
                 "authority":authority, "state_source":state_source,
                 "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
@@ -357,7 +382,19 @@ impl App {
                 "history_allocation_count": history.and_then(|m| m.allocation_count),
                 "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                 "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-            }))
+            });
+            // A pane without a location reports the same defaults as a tiled one.
+            match self.pane_location(id) {
+                Some((workspace, tab)) => {
+                    insert_placement(&mut row, &self.workspaces[workspace].tabs[tab].layout, id)
+                }
+                None => {
+                    if let Some(object) = row.as_object_mut() {
+                        object.insert("floating".to_string(), Value::Bool(false));
+                    }
+                }
+            }
+            Ok(row)
         }
     }
 
@@ -925,7 +962,7 @@ impl App {
             // you on. An explicit `luvus workspace open <path>` omits it and
             // still focuses.
             let path = PathBuf::from(req_str(p, "path")?);
-            let focus = p.get("focus").and_then(|v| v.as_bool()).unwrap_or(true);
+            let focus = optional_bool_param(p, "focus", true)?;
             match self
                 .workspaces
                 .iter()
@@ -1265,7 +1302,7 @@ impl App {
                 ));
             }
             let focus = match p.get("focus") {
-                None => tab_ref.layout.focus,
+                None => tab_ref.layout.tiled_focus,
                 Some(value) => PaneId(parse_u32_value(value, "focus")?),
             };
             tab_ref
@@ -1379,6 +1416,7 @@ impl App {
         {
             reject_api_fields(p, &["pane", "direction", "cells"])?;
             let pane = self.resolve_pane_or_focus(p)?;
+            self.require_tiled_api(pane)?;
             let direction = crate::api::topology::direction(p)?;
             let cells = p.get("cells").and_then(Value::as_i64).unwrap_or(1);
             if !(1..=1000).contains(&cells) {
@@ -1479,6 +1517,7 @@ impl App {
                 .ok_or_else(not_found)?,
             Some(value) => PaneId(parse_u32_value(value, "pane")?),
         };
+        self.require_tiled_api(pane)?;
         let changed = self.transpose_pane(pane).ok_or_else(not_found)?;
         Ok(json!({"type":"pane_transpose","pane":pane.0.to_string(),"changed":changed}))
     }
@@ -1497,6 +1536,8 @@ impl App {
                 })?,
                 "with",
             )?);
+            self.require_tiled_api(first)?;
+            self.require_tiled_api(second)?;
             let first_location = self.pane_location(first).ok_or_else(not_found)?;
             let second_location = self.pane_location(second).ok_or_else(not_found)?;
             if first_location != second_location {
@@ -1535,6 +1576,19 @@ impl App {
 }
 
 impl App {
+    /// Tiled-only API guard: split, transpose, swap and resize act on the
+    /// tiled tree, so a floating target gets the shared rejection instead of
+    /// editing the tile behind it.
+    pub(in crate::app::dispatch) fn require_tiled_api(
+        &self,
+        pane: PaneId,
+    ) -> Result<(), (String, String)> {
+        if self.is_floating_pane(pane) {
+            return Err(floating_pane_rejection());
+        }
+        Ok(())
+    }
+
     pub(in crate::app::dispatch) fn resolve_optional_pane(
         &self,
         p: &Value,
@@ -1734,7 +1788,7 @@ impl App {
             "tab":(tab+1).to_string(), "tab_id":value.id,
             "active":workspace == self.active_ws && tab == ws.active_tab,
             "name":value.name, "kind":kind, "focus":value.layout.focus.0.to_string(),
-            "panes":value.layout.leaves().into_iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
+            "panes":value.layout.all_panes().into_iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
         }))
     }
 
@@ -1746,7 +1800,7 @@ impl App {
         let terminal = self.panes.get(&pane);
         let status = self.status.get(&pane);
         let history = terminal.map(|pane| pane.history_metrics());
-        Ok(json!({
+        let mut row = json!({
             "type":"pane", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
             "workspace_id":self.workspaces[workspace].id,
             "tab":(tab+1).to_string(), "tab_id":self.workspaces[workspace].tabs[tab].id,
@@ -1762,7 +1816,9 @@ impl App {
             "history_budget_bytes":history.map(|metrics| metrics.budget_bytes),
             "history_bytes":history.map(|metrics| metrics.retained_bytes),
             "module":self.module_panes.get(&pane).map(|module| json!({"id":module.module_id,"entrypoint":module.entrypoint})),
-        }))
+        });
+        insert_placement(&mut row, &self.workspaces[workspace].tabs[tab].layout, pane);
+        Ok(row)
     }
 
     pub(in crate::app::dispatch) fn socket_pane_layout(
@@ -1772,13 +1828,22 @@ impl App {
         let (workspace, tab) = self.pane_location(pane).ok_or_else(not_found)?;
         let area = crate::api::topology::logical_area();
         let layout = &self.workspaces[workspace].tabs[tab].layout;
-        let rect = layout.pane_rect(area, pane).ok_or_else(not_found)?;
-        Ok(json!({
+        // A floating pane reports its stored rect instead of tree geometry.
+        // The reported tree stays tiled-only by design: persistence and
+        // apply_tree require a tiled-only tree, so popups never enter it (see
+        // creating_a_floating_pane_keeps_the_tiled_layout_and_takes_focus).
+        let floating = layout.is_floating(pane);
+        let rect = layout.pane_rect_any(area, pane).ok_or_else(not_found)?;
+        let mut value = json!({
             "type":"pane_layout", "pane":pane.0.to_string(), "workspace":workspace.to_string(),
             "tab":(tab+1).to_string(), "logical_size":{"width":area.width,"height":area.height},
-            "rect":{"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height},
+            "rect":rect_json(rect),
             "tree":layout.to_tree(),
-        }))
+        });
+        if floating {
+            value["floating"] = json!(true);
+        }
+        Ok(value)
     }
 
     pub(in crate::app::dispatch) fn reorder_workspace_block(
@@ -1833,9 +1898,65 @@ impl App {
     }
 }
 
+/// `pane.split` direction: `auto` follows the base pane's shape, `down` and
+/// `stack` split a row, and `right` splits a column.
+fn split_axis(app: &App, p: &Value, base: PaneId) -> Result<Axis, (String, String)> {
+    const INVALID_DIRECTION: &str = "direction must be auto, right, or down";
+    match p.get("direction") {
+        None | Some(Value::Null) => Ok(app.auto_split_axis_for(base)),
+        Some(Value::String(dir)) => match dir.as_str() {
+            "auto" => Ok(app.auto_split_axis_for(base)),
+            "down" | "stack" => Ok(Axis::Row),
+            "right" => Ok(Axis::Col),
+            _ => Err(invalid(INVALID_DIRECTION)),
+        },
+        Some(_) => Err(invalid(INVALID_DIRECTION)),
+    }
+}
+
+/// Maximum `pane.float` title length in characters.
+///
+/// Titles are drawn truncated to the border width and persisted in snapshots,
+/// so the API boundary bounds what a snapshot must store. The module path
+/// (`module` float panes) is intentionally not held to this limit.
+const MAX_FLOATING_TITLE_CHARS: usize = 64;
+
+/// Optional `pane.float` width or height: at least `MIN_FLOATING` cells.
+fn floating_dimension(p: &Value, key: &str) -> Result<Option<u16>, (String, String)> {
+    let value = optional_u16_param(p, key)?;
+    if value.is_some_and(|value| value < crate::layout::MIN_FLOATING) {
+        return Err(invalid(&format!(
+            "{key} must be at least {}",
+            crate::layout::MIN_FLOATING
+        )));
+    }
+    Ok(value)
+}
+
+/// Optional `pane.float` argv: a non-empty array of non-empty strings.
+fn floating_command(p: &Value) -> Result<Option<Vec<String>>, (String, String)> {
+    match p.get("command") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut argv = Vec::with_capacity(items.len());
+            for item in items {
+                let argument = item.as_str().filter(|argument| !argument.is_empty());
+                argv.push(
+                    argument
+                        .ok_or_else(|| invalid("command must be an array of non-empty strings"))?,
+                );
+            }
+            if argv.is_empty() {
+                return Err(invalid("command must not be empty"));
+            }
+            Ok(Some(argv.into_iter().map(str::to_string).collect()))
+        }
+        Some(_) => Err(invalid("command must be an array of strings")),
+    }
+}
+
 /// `{cwd, prompt}` from a session report that cannot name its pane.
 fn parse_session_evidence(value: &Value) -> Result<(std::path::PathBuf, String), (String, String)> {
-    let invalid = |message: &str| ("invalid_request".to_string(), message.to_string());
     let Some(object) = value.as_object() else {
         return Err(invalid("evidence must be an object"));
     };
@@ -1993,6 +2114,118 @@ mod tests {
         app.dispatch("pane.split", &json!({"direction": "auto"}))
             .expect("portrait auto split");
         assert_eq!(split_axis(&app), 1, "physically tall panes stack");
+    }
+
+    #[test]
+    fn pane_split_validates_focus_and_defaults_it_to_true() {
+        let _env = crate::persist::test_env("pane-split-focus-param");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let before = app.layout().focus;
+        let panes_before = app.panes.len();
+        for value in [json!("false"), json!("true"), json!(0), json!([true])] {
+            assert_eq!(
+                app.dispatch("pane.split", &json!({"focus": value}))
+                    .unwrap_err(),
+                (
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                ),
+                "value: {value}"
+            );
+        }
+        assert_eq!(
+            app.panes.len(),
+            panes_before,
+            "invalid focus splits nothing"
+        );
+        assert_eq!(app.layout().focus, before);
+
+        // Absent or `null` still means the new pane takes focus.
+        for params in [json!({}), json!({"focus": null})] {
+            let result = app.dispatch("pane.split", &params).unwrap();
+            assert_eq!(result["pane"], app.layout().focus.0.to_string());
+        }
+        // An explicit `false` splits without moving focus.
+        let focused = app.layout().focus;
+        let result = app
+            .dispatch("pane.split", &json!({"focus": false}))
+            .unwrap();
+        assert_ne!(result["pane"], focused.0.to_string());
+        assert_eq!(app.layout().focus, focused);
+    }
+
+    #[test]
+    fn workspace_open_validates_focus_and_defaults_it_to_true() {
+        let _env = crate::persist::test_env("workspace-open-focus-param");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.new_workspace();
+        let opened = app.active_ws;
+        assert!(opened > 0, "a second workspace is active");
+        let path = app.workspaces[0].cwd.display().to_string();
+        let workspaces_before = app.workspaces.len();
+        for value in [json!("no"), json!(1), json!([])] {
+            assert_eq!(
+                app.dispatch("workspace.open", &json!({"path": path, "focus": value}))
+                    .unwrap_err(),
+                (
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                ),
+                "value: {value}"
+            );
+        }
+        assert_eq!(app.workspaces.len(), workspaces_before);
+        assert_eq!(app.active_ws, opened);
+
+        // Absent focus still activates the existing workspace.
+        app.dispatch("workspace.open", &json!({"path": path}))
+            .unwrap();
+        assert_eq!(app.active_ws, 0);
+
+        // `focus: false` adds a workspace without stealing focus.
+        let other = std::env::temp_dir().display().to_string();
+        app.dispatch("workspace.open", &json!({"path": other, "focus": false}))
+            .unwrap();
+        assert_eq!(app.workspaces.len(), workspaces_before + 1);
+        assert_eq!(app.active_ws, 0);
+    }
+
+    #[test]
+    fn pane_float_validates_focus_and_defaults_it_to_true() {
+        let _env = crate::persist::test_env("pane-float-focus-param");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let panes_before = app.panes.len();
+        for value in [json!("true"), json!(1), json!([])] {
+            assert_eq!(
+                app.dispatch("pane.float", &json!({"focus": value}))
+                    .unwrap_err(),
+                (
+                    "invalid_request".to_string(),
+                    "focus must be a boolean".to_string()
+                ),
+                "value: {value}"
+            );
+        }
+        assert_eq!(
+            app.panes.len(),
+            panes_before,
+            "invalid focus floats nothing"
+        );
+
+        // Absent focus still gives the new floating pane focus.
+        let result = app.dispatch("pane.float", &json!({})).unwrap();
+        assert_eq!(result["pane"], app.layout().focus.0.to_string());
+
+        // `focus: false` floats without stealing focus.
+        let focused = app.layout().focus;
+        let result = app
+            .dispatch("pane.float", &json!({"focus": false}))
+            .unwrap();
+        assert_ne!(result["pane"], focused.0.to_string());
+        assert_eq!(app.layout().focus, focused);
     }
 
     #[test]

@@ -130,6 +130,8 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 /// hit-test state. Each client owns this baseline, never the shared App.
 pub(crate) struct ClientProjection {
     pub pane_content: Vec<(PaneId, Rect)>,
+    /// How many leading `pane_content` entries are floating panes, top first.
+    pub pane_floating_count: usize,
     pub hyperlinks: Vec<crate::app::RenderedHyperlink>,
     pub shell_dock: Option<Rect>,
     pub left_seam: Option<Rect>,
@@ -272,6 +274,9 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     // Geometry collections are write-only outputs of a render. Move the active
     // client's values aside instead of cloning them on every secondary frame.
     let pane_rects = std::mem::take(&mut app.pane_rects);
+    // The count belongs to `pane_rects`; a projection renders at its own size,
+    // so keep the active client's pair together and restore them below.
+    let pane_floating_count = std::mem::replace(&mut app.pane_floating_count, 0);
     let pane_content_rects = std::mem::take(&mut app.pane_content_rects);
     let rendered_hyperlinks = std::mem::take(&mut app.rendered_hyperlinks);
     let pane_title_rects = std::mem::take(&mut app.pane_title_rects);
@@ -395,6 +400,9 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
 
     render_into_mode(f, app, false);
 
+    // The projection's own floating prefix, before the active client's count is
+    // restored below. A secondary viewport can draw a different floating set.
+    let projected_floating_count = app.pane_floating_count;
     let projected_shell_dock = app.client_shell_dock_rect;
     let projected_left_seam = app.left_seam;
     let projected_right_seam = app.right_seam;
@@ -428,6 +436,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     app.file_tree.scroll = file_tree_scroll;
     app.menu_scroll = menu_scroll;
     app.pane_rects = pane_rects;
+    app.pane_floating_count = pane_floating_count;
     let projected_content = std::mem::replace(&mut app.pane_content_rects, pane_content_rects);
     let projected_hyperlinks = std::mem::replace(&mut app.rendered_hyperlinks, rendered_hyperlinks);
     app.pane_title_rects = pane_title_rects;
@@ -539,6 +548,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     }
     ClientProjection {
         pane_content: projected_content,
+        pane_floating_count: projected_floating_count,
         hyperlinks: projected_hyperlinks,
         shell_dock: projected_shell_dock,
         left_seam: projected_left_seam,
@@ -605,14 +615,25 @@ pub(crate) fn patch_terminal_damage(
     target: &mut RenderTarget,
     app: &App,
     content_rects: &[(PaneId, Rect)],
+    floating_count: usize,
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
     hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
-    panes::patch_terminal_damage(target, app, content_rects, snapshots, hyperlinks)
+    panes::patch_terminal_damage(
+        target,
+        app,
+        content_rects,
+        floating_count,
+        snapshots,
+        hyperlinks,
+    )
 }
 
 fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let t = app.theme.clone();
+    // The pane area of the previous interactive frame, captured before the reset
+    // below. A change is the tmux resize trigger for the stored floating rects.
+    let previous_pane_area = app.last_pane_area;
     // The active i18n catalog (Copy `&'static`), passed to draw fns that don't
     // get the whole `App` (picker, git tab) so all chrome is localized (docs/21).
     let cat = app.catalog;
@@ -662,6 +683,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     if app.workspaces.is_empty() {
         f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
         app.pane_rects.clear();
+        app.pane_floating_count = 0;
         app.pane_content_rects.clear();
         app.pane_title_rects.clear();
         app.tab_rects.clear();
@@ -768,8 +790,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
 
     let focus = app.layout().focus;
     // Compact mode shows a single full-screen pane (like zoom) — tiling is
-    // useless on a phone; the switcher handles navigation.
-    let rects: Vec<(PaneId, Rect)> = if app.zoomed || app.compact {
+    // useless on a phone; the switcher handles navigation. Zoom draws only the
+    // focused pane, tiled or floating, and hides every other floating pane;
+    // compact still draws the tab's floating panes, because they are shared
+    // server state that every attached client shows.
+    let single_pane = app.zoomed || app.compact;
+    let floating = floating_frame_rects(app, resize_panes, previous_pane_area, pane_area, focus);
+    let tiled: Vec<(PaneId, Rect)> = if single_pane {
         vec![(focus, pane_area)]
     } else {
         app.layout()
@@ -778,35 +805,15 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             .map(|p| (p.id, p.rect))
             .collect()
     };
-    // Only frame panes when the tab is split; a lone pane needs no border.
-    let bordered = rects.len() > 1;
+    // Only frame tiled panes when the tab is split; a lone tiled pane stays
+    // borderless even under a floating pane. Floating panes always have one.
+    let bordered = tiled.len() > 1;
     // Title visibility is shared by lone and split panes. A zoomed split keeps
     // its one-row header even when titles are hidden so the mouse/touch restore
     // control remains available.
     let lone_header = !bordered && !app.compact && (app.config.layout.show_titles || app.zoomed);
     if resize_panes {
-        for (id, rect) in &rects {
-            let Some(content) = pane_content(*rect, bordered, app.compact, lone_header) else {
-                continue;
-            };
-            let resized = app
-                .panes
-                .get_mut(id)
-                .map(|p| p.resize(content.width, content.height))
-                .unwrap_or(false);
-            // A real resize (e.g. switching to a tab whose panes have a different
-            // geometry) repaints the agent; note it so detection freezes briefly
-            // and a reflowed spinner can't flip the pane to "working" (docs/07).
-            if resized {
-                if let Some(search) = app.pane_search.as_mut().filter(|search| search.pane == *id) {
-                    search.invalidate_matches();
-                }
-                if let Some(s) = app.status.get_mut(id) {
-                    s.last_resize = Some(std::time::Instant::now());
-                    s.force_detect = true;
-                }
-            }
-        }
+        resize_panes_to_content(app, &tiled, &floating, bordered, lone_header);
     }
 
     // Clear every dock/sidebar hit-geometry up front, then let each drawn dock
@@ -859,23 +866,43 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     };
     // Behind the panes, use the (dark) pane background.
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), pane_area);
-    // The focused pane's ✕ close and ⤢ zoom buttons, for mouse hit-testing.
-    let focused_rect = bordered
-        .then(|| rects.iter().find(|(id, _)| *id == focus).map(|(_, r)| *r))
-        .flatten();
-    app.pane_close_rect = focused_rect.and_then(|r| pane_close_rect(r, bordered));
+    // The focused pane's ✕ close and ⤢ zoom buttons, for mouse hit-testing. A
+    // floating pane always carries a border, so it owns its own buttons even
+    // when the tiled layer below holds a single borderless pane.
+    let focused_chrome = focused_pane_chrome(single_pane, focus, &floating, &tiled, bordered);
+    app.pane_close_rect = focused_chrome.and_then(|rect| pane_close_rect(rect, true));
     // Zoom button: the split-title ⤢ when bordered, else the lone-header ⤡ that
     // restores a *zoomed* single pane (so a phone can un-zoom).
-    app.pane_zoom_rect = if bordered {
-        focused_rect.and_then(|r| pane_zoom_rect(r, bordered))
+    app.pane_zoom_rect = if focused_chrome.is_some() {
+        focused_chrome.and_then(|rect| pane_zoom_rect(rect, true))
     } else if app.zoomed {
-        rects
+        tiled
             .iter()
             .find(|(id, _)| *id == focus)
-            .map(|(_, r)| lone_zoom_rect(*r))
-            .filter(|r| r.width >= 3)
+            .map(|(_, rect)| lone_zoom_rect(*rect))
+            .filter(|rect| rect.width >= 3)
     } else {
         None
+    };
+    // Content rects, in hit-test order: floating panes top first, then the tiled
+    // layer. A dashboard has no selectable terminal panes.
+    let dashboard = app.active_is_git() || app.active_is_orch() || app.active_is_mission();
+    let (floating_content, tiled_content) = if dashboard {
+        (Vec::new(), Vec::new())
+    } else {
+        let floating_content: Vec<(PaneId, Rect)> = floating
+            .iter()
+            .rev()
+            .filter_map(|(id, rect)| floating_pane_content(*rect).map(|content| (*id, content)))
+            .collect();
+        let tiled_content: Vec<(PaneId, Rect)> = tiled
+            .iter()
+            .filter_map(|(id, rect)| {
+                pane_content(*rect, bordered, app.compact, lone_header)
+                    .map(|content| (*id, content))
+            })
+            .collect();
+        (floating_content, tiled_content)
     };
     // A git tab / orchestration board fills the pane area with a dashboard
     // instead of terminals.
@@ -939,19 +966,18 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         git_section_rects = git::render(f, pane_area, g, compact, cat, &t);
         None
     } else {
-        let preview_rects: Vec<(PaneId, Rect)> = rects
+        let preview_rects: Vec<(PaneId, Rect)> = floating_content
             .iter()
-            .filter_map(|(id, rect)| {
-                pane_content(*rect, bordered, app.compact, lone_header)
-                    .map(|content| (*id, content))
-            })
+            .chain(tiled_content.iter())
+            .copied()
             .collect();
         if resize_panes {
             app.ensure_preview_layouts(&preview_rects);
         }
-        let cursor = panes::draw_panes(f, &rects, bordered, lone_header, app, &t);
-        // Draw all pane borders in one overlay pass (manual cell-by-cell), then
-        // the dot+path+close titles ON each top border row.
+        let tiled_cursor = panes::draw_panes(f, &tiled, bordered, lone_header, app, &t);
+        // Draw the tiled borders in one overlay pass (manual cell-by-cell), then
+        // the dot+path+close titles ON each top border row. Floating panes draw
+        // above this layer, so their chrome comes after it.
         if bordered {
             let border_focus = app
                 .pane_navigation
@@ -961,7 +987,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
                         && navigation.tab == app.ws().active_tab
                 })
                 .map_or(Some(focus), |navigation| match navigation.candidate {
-                    PaneNavigationTarget::Pane(pane) if rects.iter().any(|(id, _)| *id == pane) => {
+                    PaneNavigationTarget::Pane(pane) if tiled.iter().any(|(id, _)| *id == pane) => {
                         Some(pane)
                     }
                     PaneNavigationTarget::Pane(_) => Some(focus),
@@ -972,28 +998,30 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             } else {
                 app.hover_divider.as_ref()
             };
-            borders::render_pane_borders(f, &rects, border_focus, hover_divider, &t);
+            borders::render_pane_borders(f, &tiled, border_focus, hover_divider, &t);
             if app.config.layout.show_titles {
-                title_rects = panes::draw_pane_titles(f, &rects, focus, app, &t);
+                title_rects = panes::draw_pane_titles(f, &tiled, focus, app, &t);
             }
         }
-        cursor
+        let (floating_cursor, mut floating_titles) =
+            panes::draw_floating_panes(f, &floating, focus, app, &t);
+        // Hit-test geometry leads with the topmost floating pane.
+        floating_titles.extend(title_rects);
+        title_rects = floating_titles;
+        floating_cursor.or(tiled_cursor)
     };
     app.git_section_rects = git_section_rects;
     app.pane_title_rects = title_rects;
     // Per-pane content rects so mouse drags map to grid cells for text selection
-    // (a git tab has no selectable terminal panes).
-    app.pane_content_rects =
-        if app.active_is_git() || app.active_is_orch() || app.active_is_mission() {
-            Vec::new()
-        } else {
-            rects
-                .iter()
-                .filter_map(|(id, r)| {
-                    pane_content(*r, bordered, app.compact, lone_header).map(|c| (*id, c))
-                })
-                .collect()
-        };
+    // (a git tab has no selectable terminal panes). Ordered like the hit-test
+    // geometry: floating panes top first, then the tiled layer.
+    app.pane_content_rects = if dashboard {
+        Vec::new()
+    } else {
+        let mut rects = floating_content;
+        rects.extend(tiled_content);
+        rects
+    };
     status::draw_status(f, status, app, &t);
     // The strip is pane chrome. Menus, modals, and toasts must paint over it.
     let commander_cursor = match (commander_area, app.commander.as_ref()) {
@@ -1322,7 +1350,32 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             app.last_cursor = Some((x, y));
         }
     }
-    app.pane_rects = rects;
+    // Hit-test geometry, topmost first: the floating stack from the top down,
+    // then the tiled layer. The first-hit lookups in `input.rs` then route an
+    // event to the topmost pane and give covered tiled cells nothing.
+    let mut pane_rects: Vec<(PaneId, Rect)> = Vec::with_capacity(floating.len() + tiled.len());
+    pane_rects.extend(floating.iter().rev().copied());
+    let pane_floating_count = floating.len();
+    pane_rects.extend(tiled.iter().copied());
+    // Hit tests treat this prefix as the floating stack. It must match what was
+    // drawn, not the layout: zoom draws none, and compact skips the focused pane
+    // because it is already the full-screen tiled pane.
+    debug_assert!(
+        pane_rects[..pane_floating_count]
+            .iter()
+            .all(|(id, _)| app.layout().is_floating(*id)),
+        "drawn floating pane is no longer floating in the layout: {:?}",
+        &pane_rects[..pane_floating_count]
+    );
+    debug_assert!(
+        !app.compact
+            || !pane_rects[..pane_floating_count]
+                .iter()
+                .any(|(id, _)| *id == focus),
+        "compact mode drew the focused pane as floating"
+    );
+    app.pane_floating_count = pane_floating_count;
+    app.pane_rects = pane_rects;
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;
     app.tab_prev_rect = tab_prev;
@@ -1332,6 +1385,131 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.new_ws_rect = new_ws_rect;
+}
+
+/// Floating panes to draw this frame, bottom to top, in client-local rects.
+///
+/// Only the interactive client may clamp the *stored* floating rects. A passive
+/// projection draws a clamped copy, so its smaller viewport never moves shared
+/// geometry or resizes another client's PTYs. Rects are stored relative to the
+/// pane area, so they are offset onto this client's screen after clamping.
+fn floating_frame_rects(
+    app: &mut App,
+    resize_panes: bool,
+    previous_pane_area: Rect,
+    pane_area: Rect,
+    focus: PaneId,
+) -> Vec<(PaneId, Rect)> {
+    let pane_bounds = Rect::new(0, 0, pane_area.width, pane_area.height);
+    if resize_panes && previous_pane_area != pane_area {
+        app.clamp_stored_floating_rects(pane_bounds);
+    }
+    if app.zoomed {
+        return Vec::new();
+    }
+    // Compact presentation fills the screen with the focused pane, so a focused
+    // floating pane is already drawn there and must not draw twice.
+    let compact = app.compact;
+    app.layout()
+        .floating_bottom_first()
+        .iter()
+        .filter(|(id, _)| !compact || *id != focus)
+        .map(|(id, rect)| {
+            let clamped = crate::layout::clamp_floating_rect(*rect, pane_bounds);
+            (
+                *id,
+                Rect::new(
+                    pane_area.x + clamped.x,
+                    pane_area.y + clamped.y,
+                    clamped.width,
+                    clamped.height,
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The focused pane's own rect when it carries ✕ / ⤢ chrome. A floating pane
+/// always carries a border, so it owns its buttons even when the tiled layer
+/// below holds a single borderless pane.
+fn focused_pane_chrome(
+    single_pane: bool,
+    focus: PaneId,
+    floating: &[(PaneId, Rect)],
+    tiled: &[(PaneId, Rect)],
+    bordered: bool,
+) -> Option<Rect> {
+    if single_pane {
+        return None;
+    }
+    if let Some((_, rect)) = floating.iter().find(|(id, _)| *id == focus) {
+        return Some(*rect);
+    }
+    if !bordered {
+        return None;
+    }
+    tiled
+        .iter()
+        .find(|(id, _)| *id == focus)
+        .map(|(_, rect)| *rect)
+}
+
+/// Size every pane's PTY to the content rect this frame will draw.
+fn resize_panes_to_content(
+    app: &mut App,
+    tiled: &[(PaneId, Rect)],
+    floating: &[(PaneId, Rect)],
+    bordered: bool,
+    lone_header: bool,
+) {
+    let compact = app.compact;
+    let tiled_content = tiled
+        .iter()
+        .map(|(id, rect)| (*id, pane_content(*rect, bordered, compact, lone_header)));
+    let floating_content = floating
+        .iter()
+        .map(|(id, rect)| (*id, floating_pane_content(*rect)));
+    for (id, content) in tiled_content.chain(floating_content) {
+        let Some(content) = content else {
+            continue;
+        };
+        let resized = app
+            .panes
+            .get_mut(&id)
+            .map(|p| p.resize(content.width, content.height))
+            .unwrap_or(false);
+        // A real resize (e.g. switching to a tab whose panes have a different
+        // geometry) repaints the agent; note it so detection freezes briefly
+        // and a reflowed spinner can't flip the pane to "working" (docs/07).
+        if resized {
+            if let Some(search) = app.pane_search.as_mut().filter(|search| search.pane == id) {
+                search.invalidate_matches();
+            }
+            if let Some(s) = app.status.get_mut(&id) {
+                s.last_resize = Some(std::time::Instant::now());
+                s.force_detect = true;
+            }
+        }
+    }
+}
+
+/// One Commander preview label: the pane id, its agent and state, plus a
+/// floating marker because a mention alone looks the same for both kinds.
+fn commander_target_label(app: &App, cat: &crate::i18n::Catalog, id: PaneId) -> Option<String> {
+    let status = app.status.get(&id)?;
+    if !app.panes.contains_key(&id) {
+        return None;
+    }
+    let label = if app.is_agent_pane(id) {
+        format!("p{} {} {}", id.0, status.agent, status.state.label())
+    } else {
+        format!("p{} {}", id.0, status.agent)
+    };
+    Some(if app.is_floating_pane(id) {
+        format!("{label} ({})", cat.floating_marker)
+    } else {
+        label
+    })
 }
 
 fn draw_commander(
@@ -1348,16 +1526,7 @@ fn draw_commander(
     let preview = commander
         .preview
         .iter()
-        .filter_map(|id| {
-            let status = app.status.get(id)?;
-            app.panes.contains_key(id).then(|| {
-                if app.is_agent_pane(*id) {
-                    format!("p{} {} {}", id.0, status.agent, status.state.label())
-                } else {
-                    format!("p{} {}", id.0, status.agent)
-                }
-            })
-        })
+        .filter_map(|id| commander_target_label(app, cat, *id))
         .collect::<Vec<_>>()
         .join(" · ");
     let title = if preview.is_empty() {
@@ -2061,6 +2230,24 @@ fn pane_content(rect: Rect, bordered: bool, mobile: bool, lone_header: bool) -> 
     Some(c)
 }
 
+/// The terminal content area of a floating pane: inside its border.
+///
+/// A floating pane may be as small as [`crate::layout::MIN_FLOATING`] (3x3 outer
+/// cells), so its content can be a single cell. [`pane_inner`] keeps its 4x4
+/// guard for tiled panes, whose minimum is [`crate::layout::MIN_PANE`] and whose
+/// lone form draws a header instead of a border.
+fn floating_pane_content(rect: Rect) -> Option<Rect> {
+    if rect.width < crate::layout::MIN_FLOATING || rect.height < crate::layout::MIN_FLOATING {
+        return None;
+    }
+    Some(Rect::new(
+        rect.x + 1,
+        rect.y + 1,
+        rect.width - 2,
+        rect.height - 2,
+    ))
+}
+
 /// Rect of the ✕ close button at the right of a pane's top-border title row.
 fn pane_close_rect(area: Rect, bordered: bool) -> Option<Rect> {
     if !bordered || area.width < 9 {
@@ -2255,6 +2442,7 @@ mod retained_render_tests {
                 &mut target,
                 &app,
                 &content_rects,
+                app.pane_floating_count,
                 &snapshots,
                 &mut hyperlinks,
             )
@@ -2328,6 +2516,7 @@ mod retained_render_tests {
                 &mut target,
                 &app,
                 &content_rects,
+                app.pane_floating_count,
                 &snapshots,
                 &mut hyperlinks,
             )
@@ -2363,6 +2552,458 @@ mod retained_render_tests {
             partial.as_nanos(),
             full.as_nanos(),
             partial.as_secs_f64() / full.as_secs_f64()
+        );
+    }
+}
+
+#[cfg(test)]
+mod floating_render_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    use crate::terminal::appearance::PaneAppearance;
+    use crate::terminal::vt::{create_engine, VtEngineKind};
+
+    /// Create a floating pane with explicit outer geometry and let it take
+    /// focus, as an ordinary `pane.float` request does.
+    fn add_floating(app: &mut App, geometry: (u16, u16, u16, u16), title: Option<&str>) -> PaneId {
+        app.float_pane(crate::app::FloatingPaneRequest::test(
+            None,
+            Some(geometry),
+            title,
+            true,
+            None,
+        ))
+        .expect("floating pane is created")
+        .pane
+    }
+
+    /// Give a pane its own VT engine with `text` on the first content row so a
+    /// render test can tell overlapping panes apart. The returned receiver keeps
+    /// the engine's terminal-response channel open for the rest of the test.
+    fn paint(
+        app: &mut App,
+        pane: PaneId,
+        text: &str,
+    ) -> mpsc::Receiver<crate::terminal::pty::InputAction> {
+        let (responses, response_rx) = mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            40,
+            12,
+            responses,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        engine.lock().expect("engine lock").advance(text.as_bytes());
+        app.panes.get_mut(&pane).expect("pane exists").engine = engine;
+        response_rx
+    }
+
+    fn render_at(app: &mut App, width: u16, height: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), app);
+        buffer
+    }
+
+    fn row_text(buffer: &Buffer, x: u16, y: u16, width: u16) -> String {
+        (x..x + width)
+            .map(|column| buffer[(column, y)].symbol())
+            .collect()
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        let area = buffer.area;
+        (area.y..area.bottom())
+            .map(|row| row_text(buffer, area.x, row, area.width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn rect_of(app: &App, pane: PaneId) -> Rect {
+        app.pane_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane is a hit target this frame")
+    }
+
+    fn content_of(app: &App, pane: PaneId) -> Rect {
+        app.pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane has content geometry")
+    }
+
+    fn stored_rect(app: &App, pane: PaneId) -> Rect {
+        app.layout()
+            .floating_rects()
+            .into_iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| rect)
+            .expect("pane is floating")
+    }
+
+    #[test]
+    fn a_new_floating_pane_draws_on_top() {
+        let _env = crate::persist::test_env("floating-render-new-on-top");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        let bottom = add_floating(&mut app, (0, 0, 24, 8), None);
+        let middle = add_floating(&mut app, (1, 1, 24, 8), None);
+        let top = add_floating(&mut app, (0, 0, 24, 8), None);
+        let _bottom_responses = paint(&mut app, bottom, "aaa");
+        let _middle_responses = paint(&mut app, middle, "bbb");
+        let _top_responses = paint(&mut app, top, "ccc");
+
+        let buffer = render_at(&mut app, 120, 40);
+
+        let hit_order: Vec<PaneId> = app.pane_rects.iter().take(3).map(|(id, _)| *id).collect();
+        assert_eq!(
+            hit_order,
+            vec![top, middle, bottom],
+            "the hit list leads with the topmost pane"
+        );
+        let top_rect = rect_of(&app, top);
+        assert_eq!(rect_of(&app, bottom), top_rect, "two panes share one rect");
+        assert_eq!(
+            row_text(&buffer, top_rect.x + 1, top_rect.y + 1, 3),
+            "ccc",
+            "the newest pane overwrites the pane below it"
+        );
+    }
+
+    #[test]
+    fn a_floating_pane_shows_its_explicit_title() {
+        let _env = crate::persist::test_env("floating-render-explicit-title");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        let pane = add_floating(&mut app, (0, 0, 40, 8), Some("Pick a branch"));
+
+        let buffer = render_at(&mut app, 120, 40);
+
+        let rect = rect_of(&app, pane);
+        let title_row = row_text(&buffer, rect.x + 1, rect.y, rect.width - 2);
+        assert!(
+            title_row.contains("Pick a branch"),
+            "the top border row shows the request title: {title_row:?}"
+        );
+    }
+
+    #[test]
+    fn a_floating_pane_without_a_title_shows_the_normal_pane_title() {
+        let _env = crate::persist::test_env("floating-render-default-title");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        let pane = add_floating(&mut app, (0, 0, 40, 8), None);
+
+        let buffer = render_at(&mut app, 120, 40);
+
+        let rect = rect_of(&app, pane);
+        let title_row = row_text(&buffer, rect.x + 1, rect.y, rect.width - 2);
+        assert!(
+            title_row.contains(&format!("p{}", pane.0)),
+            "the top border row falls back to the tiled pane title: {title_row:?}"
+        );
+    }
+
+    #[test]
+    fn a_lone_tiled_pane_stays_borderless_under_a_floating_pane() {
+        let _env = crate::persist::test_env("floating-render-lone-tiled");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        // With titles hidden, a borderless lone pane's content is its whole rect.
+        app.config.layout.show_titles = false;
+        let tiled = app.layout().focus;
+        let floating = add_floating(&mut app, (0, 0, 40, 10), None);
+
+        let buffer = render_at(&mut app, 120, 40);
+
+        let tiled_rect = rect_of(&app, tiled);
+        assert_eq!(
+            content_of(&app, tiled).height,
+            tiled_rect.height,
+            "a lone tiled pane keeps no border rows when a floating pane is above it"
+        );
+        assert_ne!(
+            buffer[(tiled_rect.x, tiled_rect.bottom() - 1)].symbol(),
+            "└",
+            "the tiled pane's bottom-left corner is not a border glyph"
+        );
+        let floating_rect = rect_of(&app, floating);
+        assert_eq!(
+            content_of(&app, floating),
+            Rect::new(
+                floating_rect.x + 1,
+                floating_rect.y + 1,
+                floating_rect.width - 2,
+                floating_rect.height - 2
+            ),
+            "a floating pane is always bordered"
+        );
+    }
+
+    #[test]
+    fn an_interactive_render_clamps_floating_rects_on_a_terminal_resize() {
+        let _env = crate::persist::test_env("floating-render-clamp-on-resize");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(160, 50, tx).expect("app starts");
+        app.config.layout.mobile_width = 40;
+        let floating = add_floating(&mut app, (80, 2, 40, 10), None);
+        render_at(&mut app, 160, 50);
+        assert_eq!(stored_rect(&app, floating), Rect::new(80, 2, 40, 10));
+
+        render_at(&mut app, 100, 30);
+
+        let area = app.last_pane_area;
+        let expected = crate::layout::clamp_floating_rect(
+            Rect::new(80, 2, 40, 10),
+            Rect::new(0, 0, area.width, area.height),
+        );
+        assert_eq!(stored_rect(&app, floating), expected);
+        assert!(
+            expected.x < 80,
+            "the pane moves left to stay inside the area"
+        );
+        assert!(
+            expected.right() <= area.width,
+            "the clamped rect fits the pane area"
+        );
+        assert_eq!(
+            app.panes[&floating].size(),
+            (expected.width - 2, expected.height - 2),
+            "the floating PTY receives the clamped content size"
+        );
+    }
+
+    #[test]
+    fn a_smaller_passive_client_clamps_floating_panes_for_drawing_only() {
+        let _env = crate::persist::test_env("floating-render-passive-clamp");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(160, 50, tx).expect("app starts");
+        app.config.layout.mobile_width = 40;
+        let floating = add_floating(&mut app, (60, 2, 40, 10), None);
+        render_at(&mut app, 160, 50);
+        let stored = stored_rect(&app, floating);
+        let pty = app.panes[&floating].size();
+        let active_content = content_of(&app, floating);
+
+        let small = Rect::new(0, 0, 80, 24);
+        let mut buffer = Buffer::empty(small);
+        let projection = render_projection(&mut RenderTarget::new(&mut buffer, small), &mut app);
+
+        assert_eq!(
+            stored_rect(&app, floating),
+            stored,
+            "a passive client cannot move a stored floating rect"
+        );
+        assert_eq!(
+            app.panes[&floating].size(),
+            pty,
+            "a passive client cannot resize a floating PTY"
+        );
+        assert_eq!(
+            content_of(&app, floating),
+            active_content,
+            "the active hit geometry survives the projection"
+        );
+        let (_, projected) = projection
+            .pane_content
+            .iter()
+            .find(|(id, _)| *id == floating)
+            .copied()
+            .expect("the projection draws the floating pane");
+        assert_eq!(projected.width, stored.width - 2);
+        assert!(
+            projected.right() <= projection.pane_area.right(),
+            "the smaller client clamps the pane into its own pane area"
+        );
+        assert!(
+            projected.x < active_content.x,
+            "the smaller client draws the pane further left"
+        );
+    }
+
+    #[test]
+    fn a_three_by_three_floating_pane_draws_one_content_cell() {
+        let _env = crate::persist::test_env("floating-render-min-size");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        app.config.layout.mobile_width = 40;
+        let floating = add_floating(&mut app, (0, 0, 3, 3), None);
+        let _responses = paint(&mut app, floating, "z");
+
+        let buffer = render_at(&mut app, 120, 40);
+
+        let rect = rect_of(&app, floating);
+        assert_eq!((rect.width, rect.height), (3, 3));
+        let content = content_of(&app, floating);
+        assert_eq!(
+            content,
+            Rect::new(rect.x + 1, rect.y + 1, 1, 1),
+            "the minimum floating pane keeps its single content cell"
+        );
+        assert_eq!(
+            app.panes[&floating].size(),
+            (1, 1),
+            "the PTY follows the one-cell content rect"
+        );
+        assert_eq!(buffer[(content.x, content.y)].symbol(), "z");
+    }
+
+    #[test]
+    fn minimum_floating_sizes_resize_their_ptys() {
+        let _env = crate::persist::test_env("floating-render-min-sizes");
+        for (width, height, expected) in [(4, 3, (2, 1)), (3, 4, (1, 2))] {
+            let (tx, _rx) = mpsc::channel();
+            let mut app = App::new(120, 40, tx).expect("app starts");
+            app.config.layout.mobile_width = 40;
+            let floating = add_floating(&mut app, (0, 0, width, height), None);
+
+            render_at(&mut app, 120, 40);
+
+            let content = content_of(&app, floating);
+            assert_eq!(
+                (content.width, content.height),
+                expected,
+                "{width}x{height}"
+            );
+            assert_eq!(app.panes[&floating].size(), expected, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn tiled_content_geometry_keeps_its_four_by_four_minimum() {
+        assert_eq!(
+            pane_content(Rect::new(0, 0, 4, 4), true, false, false),
+            Some(Rect::new(1, 1, 2, 2))
+        );
+        assert_eq!(
+            pane_content(Rect::new(0, 0, 3, 3), true, false, false),
+            None,
+            "tiled content keeps its 4x4 guard"
+        );
+        assert_eq!(
+            floating_pane_content(Rect::new(0, 0, 3, 3)),
+            Some(Rect::new(1, 1, 1, 1))
+        );
+        assert_eq!(
+            floating_pane_content(Rect::new(0, 0, 2, 3)),
+            None,
+            "a floating rect below the minimum has no content"
+        );
+    }
+
+    #[test]
+    fn a_compact_client_still_draws_floating_panes() {
+        let _env = crate::persist::test_env("floating-render-compact");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        let tiled = app.layout().focus;
+        let floating = add_floating(&mut app, (4, 2, 40, 8), None);
+        // A phone keeps the shared focus on the tiled pane and shows the tab's
+        // floating pane above its full-screen pane.
+        app.focus_location(0, 0, tiled);
+
+        let small = Rect::new(0, 0, 60, 24);
+        let mut buffer = Buffer::empty(small);
+        let projection = render_projection(&mut RenderTarget::new(&mut buffer, small), &mut app);
+
+        let (_, projected) = projection
+            .pane_content
+            .iter()
+            .find(|(id, _)| *id == floating)
+            .copied()
+            .expect("a compact client draws the tab's floating pane");
+        assert!(projected.right() <= projection.pane_area.right());
+        assert!(
+            !app.compact,
+            "a projection never replaces the active client's profile"
+        );
+    }
+
+    #[test]
+    fn zoom_a_tiled_pane_hides_floating_panes() {
+        let _env = crate::persist::test_env("floating-render-zoom-tiled");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        app.config.layout.mobile_width = 40;
+        let tiled = app.layout().focus;
+        let floating = add_floating(&mut app, (0, 0, 40, 10), None);
+        let _tiled_responses = paint(&mut app, tiled, "ttt");
+        let _floating_responses = paint(&mut app, floating, "fff");
+        assert!(
+            buffer_text(&render_at(&mut app, 120, 40)).contains("fff"),
+            "the floating pane draws before zoom"
+        );
+
+        app.focus_location(0, 0, tiled);
+        app.zoomed = true;
+        let buffer = render_at(&mut app, 120, 40);
+
+        assert_eq!(app.pane_rects.len(), 1, "zoom draws exactly one pane");
+        assert_eq!(app.pane_rects[0].0, tiled);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("ttt"));
+        assert!(
+            !text.contains("fff"),
+            "the floating pane is hidden under zoom"
+        );
+
+        app.zoomed = false;
+        assert!(
+            buffer_text(&render_at(&mut app, 120, 40)).contains("fff"),
+            "unzoom restores the floating pane"
+        );
+        assert_eq!(stored_rect(&app, floating), Rect::new(0, 0, 40, 10));
+    }
+
+    #[test]
+    fn zoom_a_floating_pane_restores_its_stored_rect_on_unzoom() {
+        let _env = crate::persist::test_env("floating-render-zoom-floating");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(120, 40, tx).expect("app starts");
+        app.config.layout.mobile_width = 40;
+        let floating = add_floating(&mut app, (10, 2, 40, 10), None);
+        let _floating_responses = paint(&mut app, floating, "fff");
+        render_at(&mut app, 120, 40);
+        let stored = stored_rect(&app, floating);
+        let pane_area = app.last_pane_area;
+        assert_eq!(stored, Rect::new(10, 2, 40, 10));
+
+        app.zoomed = true;
+        let buffer = render_at(&mut app, 120, 40);
+
+        assert_eq!(
+            app.pane_rects,
+            vec![(floating, pane_area)],
+            "zoom fills the pane area with the floating pane"
+        );
+        let zoomed_content = pane_content(pane_area, false, app.compact, true).expect("content");
+        assert_eq!(content_of(&app, floating), zoomed_content);
+        assert_eq!(
+            app.panes[&floating].size(),
+            (zoomed_content.width, zoomed_content.height)
+        );
+        assert!(buffer_text(&buffer).contains("fff"));
+
+        app.zoomed = false;
+        render_at(&mut app, 120, 40);
+        assert_eq!(
+            stored_rect(&app, floating),
+            stored,
+            "unzoom keeps the stored floating rect"
+        );
+        assert_eq!(
+            rect_of(&app, floating),
+            Rect::new(
+                pane_area.x + stored.x,
+                pane_area.y + stored.y,
+                stored.width,
+                stored.height
+            )
         );
     }
 }

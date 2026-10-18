@@ -657,7 +657,7 @@ impl App {
                 .workspaces
                 .iter()
                 .flat_map(|ws| ws.tabs.iter())
-                .flat_map(|tab| tab.layout.leaves())
+                .flat_map(|tab| tab.layout.all_panes())
                 .filter(|id| self.panes.contains_key(id))
                 .collect(),
         };
@@ -1276,7 +1276,7 @@ impl App {
                     .enumerate()
                     .filter_map(|(index, tab_item)| {
                         tab.is_none_or(|selected| index == selected)
-                            .then_some(tab_item.layout.leaves())
+                            .then_some(tab_item.layout.all_panes())
                     })
             })
             .flatten()

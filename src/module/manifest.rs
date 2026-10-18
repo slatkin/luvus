@@ -175,8 +175,23 @@ pub struct EventHook {
 pub struct PaneEntry {
     pub id: String,
     pub title: String,
+    /// `split` (default), `overlay`, `tab`, or `floating`.
     #[serde(default = "default_placement")]
     pub placement: String,
+    /// Outer width in cells for `placement = "floating"`. Other placements
+    /// ignore it. Optional so manifests written before floating panes load
+    /// unchanged.
+    #[serde(default)]
+    pub width: Option<u16>,
+    /// Outer height in cells for `placement = "floating"`.
+    #[serde(default)]
+    pub height: Option<u16>,
+    /// Left edge in pane-area cells for `placement = "floating"`.
+    #[serde(default)]
+    pub x: Option<u16>,
+    /// Top edge in pane-area cells for `placement = "floating"`.
+    #[serde(default)]
+    pub y: Option<u16>,
     #[serde(default)]
     pub platforms: Option<Vec<String>>,
     pub command: Vec<String>,
@@ -661,6 +676,64 @@ mod tests {
         let mut m = base();
         m.actions.push(action("refresh"));
         assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn pane_entries_without_floating_fields_still_load() {
+        let m: ModuleManifest = toml::from_str(
+            r#"
+id = "you.legacy"
+name = "Legacy"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[panes]]
+id = "board"
+title = "Board"
+command = ["sh", "board.sh"]
+"#,
+        )
+        .expect("an old manifest still parses");
+        m.validate().expect("and validates");
+        let pane = &m.panes[0];
+        assert_eq!(pane.placement, "split");
+        assert_eq!(
+            (pane.width, pane.height, pane.x, pane.y),
+            (None, None, None, None)
+        );
+    }
+
+    /// The manifest example documented for `placement = "floating"`. Keep the
+    /// docs unit quoting this exact block.
+    #[test]
+    fn floating_pane_manifest_example_parses() {
+        let m: ModuleManifest = toml::from_str(
+            r#"
+id = "you.prompt"
+name = "Prompt"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[panes]]
+id = "prompt"
+title = "Pick a branch"
+placement = "floating"
+width = 60
+height = 8
+x = 10
+y = 3
+command = ["sh", "prompt.sh"]
+"#,
+        )
+        .expect("the documented floating pane example parses");
+        m.validate().expect("and validates");
+        let pane = &m.panes[0];
+        assert_eq!(pane.placement, "floating");
+        assert_eq!(pane.title, "Pick a branch");
+        assert_eq!(
+            (pane.width, pane.height, pane.x, pane.y),
+            (Some(60), Some(8), Some(10), Some(3))
+        );
     }
 
     #[test]

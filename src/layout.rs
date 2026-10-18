@@ -1,5 +1,5 @@
-//! Binary space-partition tiling tree. Panes are leaves; splits are internal
-//! nodes with a ratio. See docs/04-data-model.md §4.
+//! Binary space-partition tiling tree. Tiled panes are leaves; floating panes
+//! are IDs with rects above the tree. See docs/04-data-model.md §4.
 
 use std::collections::{HashMap, HashSet};
 
@@ -84,9 +84,133 @@ pub struct Divider {
 /// Minimum cells a pane keeps along the split axis, so a resize can't crush it.
 pub const MIN_PANE: u16 = 4;
 
+/// Minimum outer size of a floating pane: a border plus one content cell.
+pub const MIN_FLOATING: u16 = 3;
+
+/// First cascade position for a floating pane, in pane-area cells (tmux 3.8).
+const FLOATING_CASCADE_START: (u16, u16) = (4, 2);
+
+/// Cascade step between floating panes (tmux 3.8).
+const FLOATING_CASCADE_STEP: (u16, u16) = (4, 2);
+
+/// Default outer size for a floating pane created without a size: half the
+/// pane area's width and a quarter of its height. Never smaller than
+/// [`MIN_FLOATING`], never larger than the area.
+pub fn default_floating_size(area: Rect) -> (u16, u16) {
+    let width = (area.width / 2).clamp(MIN_FLOATING.min(area.width), area.width);
+    let height = (area.height / 4).clamp(MIN_FLOATING.min(area.height), area.height);
+    (width, height)
+}
+
+/// Next cascaded position for a floating pane of `width` by `height` cells.
+///
+/// `last` is the position of the previously created floating pane, or `None`
+/// when the tab has no floating panes. The first pane goes to (4, 2); each next
+/// one moves 4 right and 2 down. An axis whose next value would put the pane
+/// past the pane area restarts at 4 or 2. Positions are relative to the pane
+/// area. The returned position is also the cursor to pass as `last` next time.
+pub fn cascade_floating_position(
+    area: Rect,
+    width: u16,
+    height: u16,
+    last: Option<(u16, u16)>,
+) -> (u16, u16) {
+    let (start_x, start_y) = FLOATING_CASCADE_START;
+    let (step_x, step_y) = FLOATING_CASCADE_STEP;
+    let (mut x, mut y) = match last {
+        Some((last_x, last_y)) => (last_x.saturating_add(step_x), last_y.saturating_add(step_y)),
+        None => (start_x, start_y),
+    };
+    if x.saturating_add(width) > area.width {
+        x = start_x;
+    }
+    if y.saturating_add(height) > area.height {
+        y = start_y;
+    }
+    (x, y)
+}
+
+/// Whether an outer floating-pane size is at least [`MIN_FLOATING`] on both
+/// axes.
+pub fn floating_size_valid(width: u16, height: u16) -> bool {
+    width >= MIN_FLOATING && height >= MIN_FLOATING
+}
+
+/// A resolved floating-pane placement in pane-area cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FloatGeometry {
+    /// The clamped outer rect to store.
+    pub rect: Rect,
+    /// The requested top-left, remembered as the tab's cascade cursor.
+    pub cascade: (u16, u16),
+}
+
+/// Resolve a new floating pane's outer rect from requested size and position.
+///
+/// Missing `width`/`height` use [`default_floating_size`]; missing `x`/`y`
+/// cascade from `last` like [`cascade_floating_position`]. Returns `None` when
+/// the requested size is below [`MIN_FLOATING`], and when the rect clamped to
+/// `area` still ends up below it (only possible when the pane area itself is
+/// smaller than [`MIN_FLOATING`]). The rect is clamped to `area`.
+pub fn resolve_floating_geometry(
+    area: Rect,
+    width: Option<u16>,
+    height: Option<u16>,
+    x: Option<u16>,
+    y: Option<u16>,
+    last: Option<(u16, u16)>,
+) -> Option<FloatGeometry> {
+    let (default_width, default_height) = default_floating_size(area);
+    let width = width.unwrap_or(default_width);
+    let height = height.unwrap_or(default_height);
+    if !floating_size_valid(width, height) {
+        return None;
+    }
+    let (x, y) = match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        (x, y) => {
+            let (cx, cy) = cascade_floating_position(area, width, height, last);
+            (x.unwrap_or(cx), y.unwrap_or(cy))
+        }
+    };
+    let rect = clamp_floating_rect(Rect::new(x, y, width, height), area);
+    // `clamp_floating_rect` keeps the minimum as its floor unless the area is
+    // smaller, so a valid request only lands below it when the pane area is
+    // under `MIN_FLOATING` on some axis. Reject that here, before any spawn, so
+    // a stored floating rect is always attachable.
+    if !floating_size_valid(rect.width, rect.height) {
+        return None;
+    }
+    Some(FloatGeometry {
+        rect,
+        cascade: (x, y),
+    })
+}
+
+/// Shrink and move a floating pane rect until it fits inside the pane area.
+///
+/// The minimum outer size is [`MIN_FLOATING`] by [`MIN_FLOATING`], unless the
+/// area itself is smaller. Rects use pane-area coordinates, so only the area's
+/// extent matters here.
+pub fn clamp_floating_rect(rect: Rect, area: Rect) -> Rect {
+    let width = rect.width.clamp(MIN_FLOATING.min(area.width), area.width);
+    let height = rect
+        .height
+        .clamp(MIN_FLOATING.min(area.height), area.height);
+    let x = rect.x.min(area.width.saturating_sub(width));
+    let y = rect.y.min(area.height.saturating_sub(height));
+    Rect::new(x, y, width, height)
+}
+
 pub struct TileLayout {
     root: Node,
+    /// The focused pane of the tab: a tree leaf or a floating pane.
     pub focus: PaneId,
+    /// Floating panes above the tree, bottom first and top last. Rects are
+    /// outer rects in pane-area cells.
+    floating: Vec<(PaneId, Rect)>,
+    /// The last focused tiled pane; always a tree leaf.
+    pub tiled_focus: PaneId,
 }
 
 /// Serializable mirror of the tree (leaves carry the runtime pane id at save
@@ -107,6 +231,8 @@ impl TileLayout {
         TileLayout {
             root: Node::Leaf(root),
             focus: root,
+            floating: Vec::new(),
+            tiled_focus: root,
         }
     }
 
@@ -126,11 +252,17 @@ impl TileLayout {
             .get(&focus_raw)
             .copied()
             .unwrap_or_else(|| first_leaf(&root));
-        Some(TileLayout { root, focus })
+        Some(TileLayout {
+            root,
+            focus,
+            floating: Vec::new(),
+            tiled_focus: focus,
+        })
     }
 
+    /// Number of panes in the tab, tiled and floating.
     pub fn len(&self) -> usize {
-        count(&self.root)
+        count(&self.root) + self.floating.len()
     }
 
     /// Zero-based visual position of a pane without allocating the full leaf
@@ -140,19 +272,134 @@ impl TileLayout {
         find_leaf_position(&self.root, id, &mut next)
     }
 
-    /// Leaves in left-to-right / top-to-bottom order.
+    /// Tiled leaves in left-to-right / top-to-bottom order.
+    ///
+    /// Floating panes are deliberately excluded: tree operations, persistence
+    /// and the damage fast path must never see them.
     pub fn leaves(&self) -> Vec<PaneId> {
         let mut v = Vec::new();
         collect_leaves(&self.root, &mut v);
         v
     }
 
-    /// Whether a pane belongs to this layout, without allocating a leaf list.
-    pub fn contains(&self, id: PaneId) -> bool {
-        contains_leaf(&self.root, id)
+    /// Every pane in the tab: tiled leaves, then floating panes top first.
+    ///
+    /// Render paths should prefer [`Self::for_each_pane`], which visits the same
+    /// panes in the same order without allocating; keep this for callers that
+    /// need the collected list.
+    pub fn all_panes(&self) -> Vec<PaneId> {
+        let mut v = self.leaves();
+        v.extend(self.floating.iter().rev().map(|(id, _)| *id));
+        v
     }
 
-    /// Geometry for every pane within `area`.
+    /// Visit every pane in the tab in [`Self::all_panes`] order: tiled leaves
+    /// left to right and top to bottom, then floating panes top first.
+    ///
+    /// Use this on render paths that only need to look at each pane once.
+    pub fn for_each_pane(&self, mut f: impl FnMut(PaneId)) {
+        for_each_leaf(&self.root, &mut f);
+        for (id, _) in self.floating.iter().rev() {
+            f(*id);
+        }
+    }
+
+    /// Stored floating pane rects, top first. Rects are relative to the tab's
+    /// pane area.
+    pub fn floating_rects(&self) -> Vec<(PaneId, Rect)> {
+        self.floating.iter().rev().copied().collect()
+    }
+
+    /// Stored floating pane rects in draw order: bottom first and top last,
+    /// the order the stack is stored in. Rects are outer rects in pane-area
+    /// cells, unclamped against any client viewport.
+    pub fn floating_bottom_first(&self) -> &[(PaneId, Rect)] {
+        &self.floating
+    }
+
+    /// Stored rect of one floating pane, without allocating the full list.
+    /// Tiled and unknown IDs return `None`.
+    pub fn floating_rect(&self, id: PaneId) -> Option<Rect> {
+        self.floating_position(id).map(|(_, rect)| rect)
+    }
+
+    /// Stored outer rect and top-first stacking position of one floating pane,
+    /// without allocating the full list. `0` is the top of the stack, matching
+    /// [`Self::floating_rects`]. Tiled and unknown IDs return `None`.
+    pub fn floating_position(&self, id: PaneId) -> Option<(usize, Rect)> {
+        // `self.floating` is bottom first, so the top-first position inverts.
+        let bottom = self.floating.iter().position(|(pane, _)| *pane == id)?;
+        Some((self.floating.len() - 1 - bottom, self.floating[bottom].1))
+    }
+
+    /// Whether `id` is a floating pane.
+    pub fn is_floating(&self, id: PaneId) -> bool {
+        self.floating.iter().any(|(pane, _)| *pane == id)
+    }
+
+    /// Add a floating pane above the current top one.
+    pub fn add_floating(&mut self, id: PaneId, rect: Rect) {
+        self.floating.push((id, rect));
+    }
+
+    /// Replace the stored rect of a floating pane without changing its stacking
+    /// order. Unknown or tiled IDs are ignored.
+    pub fn set_floating_rect(&mut self, id: PaneId, rect: Rect) {
+        if let Some(entry) = self.floating.iter_mut().find(|(pane, _)| *pane == id) {
+            entry.1 = rect;
+        }
+    }
+
+    /// Move a floating pane to the top of the stack. Returns `false` when the
+    /// pane is not floating.
+    pub fn raise(&mut self, id: PaneId) -> bool {
+        let Some(index) = self.floating.iter().position(|(pane, _)| *pane == id) else {
+            return false;
+        };
+        let pane = self.floating.remove(index);
+        self.floating.push(pane);
+        true
+    }
+
+    /// Focus a pane while keeping the tiled/floating bookkeeping in step: a
+    /// floating pane rises to the top of the stack and the last focused tiled
+    /// pane stays `tiled_focus`; a tiled pane becomes `tiled_focus`.
+    ///
+    /// This is the single owner of the raise/`tiled_focus` rule, so callers
+    /// cannot focus a pane without it.
+    pub fn set_focus(&mut self, id: PaneId) {
+        if self.is_floating(id) {
+            self.raise(id);
+        } else {
+            self.tiled_focus = id;
+        }
+        self.focus = id;
+    }
+
+    /// Whether a pane belongs to this layout, without allocating a leaf list.
+    pub fn contains(&self, id: PaneId) -> bool {
+        contains_leaf(&self.root, id) || self.is_floating(id)
+    }
+
+    /// The tree-only anchor a tree operation acts on for any pane id: a
+    /// floating pane answers from `tiled_focus`, because it has no tree leaf.
+    /// A tiled or unknown id is returned unchanged, so callers that already
+    /// validated the pane keep their own error handling.
+    pub fn tiled_anchor(&self, pane: PaneId) -> PaneId {
+        if self.is_floating(pane) {
+            self.tiled_focus
+        } else {
+            pane
+        }
+    }
+
+    /// The tree leaf that a tree-only operation acts on.
+    fn tree_focus(&self) -> PaneId {
+        self.tiled_anchor(self.focus)
+    }
+
+    /// Tiled pane geometry within `area`. Floating panes have stored rects
+    /// instead, so they are excluded here.
     pub fn panes(&self, area: Rect) -> Vec<PaneInfo> {
         let mut v = Vec::new();
         collect(&self.root, area, &mut v);
@@ -160,14 +407,34 @@ impl TileLayout {
     }
 
     /// Replace the focused leaf with a split and focus the new pane.
+    ///
+    /// A floating focus splits the last focused tiled pane instead; the new
+    /// pane takes focus from the floating pane.
     pub fn split_focused(&mut self, axis: Axis, new_id: PaneId) {
-        split_at(&mut self.root, self.focus, axis, new_id);
+        let target = self.tree_focus();
+        debug_assert!(
+            contains_leaf(&self.root, target),
+            "split target must be a tiled pane"
+        );
+        split_at(&mut self.root, target, axis, new_id);
         self.focus = new_id;
+        self.tiled_focus = new_id;
     }
 
-    /// Remove a pane, collapsing its parent split. Returns `true` if the tree
-    /// is now empty.
+    /// Remove a pane from the tree or the floating stack, collapsing a split
+    /// parent when needed. Returns `true` if the tree is now empty.
+    ///
+    /// Removing the focused floating pane returns focus to the last focused
+    /// tiled pane. A tree with no leaves counts as empty even when floating
+    /// panes remain, so the tab closes.
     pub fn remove(&mut self, id: PaneId) -> bool {
+        if let Some(index) = self.floating.iter().position(|(pane, _)| *pane == id) {
+            self.floating.remove(index);
+            if self.focus == id {
+                self.focus = self.tiled_focus;
+            }
+            return false;
+        }
         let root = std::mem::replace(&mut self.root, Node::Leaf(id));
         match remove_node(root, id) {
             Some(n) => {
@@ -175,35 +442,65 @@ impl TileLayout {
                 if self.focus == id {
                     self.focus = first_leaf(&self.root);
                 }
+                if self.tiled_focus == id {
+                    self.tiled_focus = if self.is_floating(self.focus) {
+                        first_leaf(&self.root)
+                    } else {
+                        self.focus
+                    };
+                }
                 false
             }
             None => true,
         }
     }
 
-    /// Move focus to the nearest pane in `dir` (geometric).
+    /// Move focus to the nearest tiled pane in `dir` (geometric).
+    ///
+    /// A floating focus starts from the last focused tiled pane; the move never
+    /// ends on a floating pane.
     pub fn focus_dir(&mut self, area: Rect, dir: Dir) {
-        if let Some(id) = self.find_in_direction_from(area, self.focus, dir) {
+        let from = self.tree_focus();
+        if let Some(id) = self.find_in_direction_from(area, from, dir) {
             self.focus = id;
+            self.tiled_focus = id;
         }
     }
 
     /// Query directional navigation without changing focus. Socket inspection
-    /// uses exactly the same geometric rule as the TUI.
+    /// uses exactly the same geometric rule as the TUI. A floating pane answers
+    /// from the tab's last focused tiled pane.
     pub fn neighbor(&self, area: Rect, pane: PaneId, dir: Dir) -> Option<PaneId> {
-        self.find_in_direction_from(area, pane, dir)
+        let from = self.tiled_anchor(pane);
+        self.find_in_direction_from(area, from, dir)
     }
 
+    /// Tree geometry for a tiled pane. Floating panes have stored rects instead.
     pub fn pane_rect(&self, area: Rect, pane: PaneId) -> Option<Rect> {
+        debug_assert!(
+            contains_leaf(&self.root, pane),
+            "pane_rect is tree geometry and needs a tiled pane"
+        );
         self.panes(area)
             .into_iter()
             .find(|candidate| candidate.id == pane)
             .map(|candidate| candidate.rect)
     }
 
+    /// Geometry for any pane in the tab: the stored rect for a floating pane,
+    /// tree geometry for a tiled one. Callers that accept both kinds of pane
+    /// should use this instead of branching on [`Self::is_floating`].
+    pub fn pane_rect_any(&self, area: Rect, pane: PaneId) -> Option<Rect> {
+        self.floating_rect(pane)
+            .or_else(|| self.pane_rect(area, pane))
+    }
+
     /// Swap two leaf identities without moving or recreating either PTY.
     pub fn swap_panes(&mut self, first: PaneId, second: PaneId) -> bool {
-        if first == second || !self.contains(first) || !self.contains(second) {
+        if first == second
+            || !contains_leaf(&self.root, first)
+            || !contains_leaf(&self.root, second)
+        {
             return false;
         }
         swap_leaf_ids(&mut self.root, first, second);
@@ -216,7 +513,11 @@ impl TileLayout {
     /// both pane identities. Descendant splits and their ratios are untouched,
     /// so transposing a pane is a local layout operation rather than a global
     /// rearrangement.
+    ///
+    /// A floating pane maps to the last focused tiled pane; the dispatch layer
+    /// rejects floating targets before this call.
     pub fn transpose_pane(&mut self, pane: PaneId) -> bool {
+        let pane = self.tiled_anchor(pane);
         let mut path = Vec::new();
         if !path_to_leaf(&self.root, pane, &mut path) || path.is_empty() {
             return false;
@@ -237,9 +538,15 @@ impl TileLayout {
     /// Replace the tree only when it contains every current pane exactly once.
     /// This makes `layout.apply` atomic and preserves all pane-owned state.
     pub fn apply_tree(&mut self, tree: &LayoutTree, focus: PaneId) -> Result<(), &'static str> {
+        if self.is_floating(focus) {
+            return Err("layout focus must be a tiled pane");
+        }
         let current: HashSet<u32> = self.leaves().into_iter().map(|id| id.0).collect();
         let mut requested = Vec::new();
         collect_raw_leaves(tree, &mut requested);
+        if requested.iter().any(|raw| self.is_floating(PaneId(*raw))) {
+            return Err("layout must not contain a floating pane");
+        }
         let requested_set: HashSet<u32> = requested.iter().copied().collect();
         if requested_set.len() != requested.len() {
             return Err("layout contains a duplicate pane");
@@ -251,7 +558,12 @@ impl TileLayout {
             return Err("layout focus is not part of the tree");
         }
         self.root = build_live_node(tree, Rect::new(0, 0, 10_000, 10_000));
-        self.focus = focus;
+        debug_assert!(contains_leaf(&self.root, focus));
+        self.tiled_focus = focus;
+        // Applying a tree never pulls focus off a floating pane.
+        if !self.is_floating(self.focus) {
+            self.focus = focus;
+        }
         Ok(())
     }
 
@@ -269,6 +581,10 @@ impl TileLayout {
     /// function weighted along-axis distance 1000x against sideways offset, so
     /// being in a completely different column cost almost nothing.
     fn find_in_direction_from(&self, area: Rect, from: PaneId, dir: Dir) -> Option<PaneId> {
+        debug_assert!(
+            contains_leaf(&self.root, from),
+            "directional focus starts on a tiled pane"
+        );
         let panes = self.panes(area);
         let cur = panes.iter().find(|p| p.id == from)?;
         let (c_lo, c_hi) = perp_span(cur.rect, dir);
@@ -423,8 +739,13 @@ impl TileLayout {
             Dir::Down => (Axis::Row, false, 1.0),
             Dir::Up => (Axis::Row, true, -1.0),
         };
+        let target = self.tree_focus();
+        debug_assert!(
+            contains_leaf(&self.root, target),
+            "resize target must be a tiled pane"
+        );
         let mut leaf_path = Vec::new();
-        if !path_to_leaf(&self.root, self.focus, &mut leaf_path) {
+        if !path_to_leaf(&self.root, target, &mut leaf_path) {
             return false;
         }
         // Deepest ancestor split matching (axis, side) — closest to the focus.
@@ -497,6 +818,17 @@ fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
         Node::Split { a, b, .. } => {
             collect_leaves(a, out);
             collect_leaves(b, out);
+        }
+    }
+}
+
+/// Same visit order as [`collect_leaves`] without building the list.
+fn for_each_leaf(node: &Node, f: &mut impl FnMut(PaneId)) {
+    match node {
+        Node::Leaf(id) => f(*id),
+        Node::Split { a, b, .. } => {
+            for_each_leaf(a, f);
+            for_each_leaf(b, f);
         }
     }
 }
@@ -1127,5 +1459,424 @@ mod tests {
             auto_split_axis_with_cell_aspect(60, 40, f32::NAN),
             Axis::Col
         );
+    }
+
+    fn floating_ids(layout: &TileLayout) -> Vec<PaneId> {
+        layout
+            .floating_rects()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    fn visited_panes(layout: &TileLayout) -> Vec<PaneId> {
+        let mut seen = Vec::new();
+        layout.for_each_pane(|id| seen.push(id));
+        seen
+    }
+
+    #[test]
+    fn new_layout_has_no_floating_panes_and_tracks_tiled_focus() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        assert!(layout.floating_rects().is_empty());
+        assert_eq!(layout.focus, a);
+        assert_eq!(layout.tiled_focus, a);
+
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        assert_eq!(layout.tiled_focus, b, "a split focuses the new tiled pane");
+
+        let remap = [(a.0, a), (b.0, b)].into_iter().collect();
+        let restored = TileLayout::from_tree(&layout.to_tree(), &remap, a.0).unwrap();
+        assert_eq!(restored.focus, a);
+        assert_eq!(restored.tiled_focus, a);
+        assert!(restored.floating_rects().is_empty());
+
+        let tree = layout.to_tree();
+        layout.apply_tree(&tree, a).unwrap();
+        assert_eq!(layout.focus, a);
+        assert_eq!(layout.tiled_focus, a);
+    }
+
+    #[test]
+    fn floating_panes_stack_and_enumeration_includes_them() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let (first, second, third) = (PaneId::alloc(), PaneId::alloc(), PaneId::alloc());
+        for (id, x) in [(first, 0), (second, 4), (third, 8)] {
+            layout.add_floating(id, Rect::new(x, 2, 20, 8));
+        }
+
+        assert_eq!(
+            floating_ids(&layout),
+            vec![third, second, first],
+            "top first"
+        );
+        assert_eq!(layout.all_panes(), vec![a, b, third, second, first]);
+        assert_eq!(
+            visited_panes(&layout),
+            vec![a, b, third, second, first],
+            "for_each_pane visits all_panes order"
+        );
+        assert_eq!(layout.len(), 5, "len counts tiled and floating panes");
+        assert!(layout.is_floating(third));
+        assert!(!layout.is_floating(a));
+        assert!(!layout.leaves().contains(&first), "leaves stays tree-only");
+
+        assert!(layout.raise(first), "raising a float succeeds");
+        assert_eq!(floating_ids(&layout), vec![first, third, second]);
+        assert!(!layout.raise(a), "a tiled pane cannot be raised");
+        assert!(!layout.remove(first), "the tree still has leaves");
+        assert_eq!(floating_ids(&layout), vec![third, second]);
+        assert!(!layout.contains(first));
+        assert!(layout.contains(second));
+        assert_eq!(layout.all_panes(), vec![a, b, third, second]);
+        assert_eq!(visited_panes(&layout), vec![a, b, third, second]);
+        assert_eq!(layout.leaves(), vec![a, b]);
+    }
+
+    #[test]
+    fn set_focus_raises_floats_and_tracks_tiled_focus() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let (first, second) = (PaneId::alloc(), PaneId::alloc());
+        layout.add_floating(first, Rect::new(0, 2, 20, 8));
+        layout.add_floating(second, Rect::new(4, 4, 20, 8));
+
+        layout.set_focus(first);
+        assert_eq!(layout.focus, first);
+        assert_eq!(layout.tiled_focus, b, "a float keeps the tiled focus");
+        assert_eq!(floating_ids(&layout), vec![first, second], "focus raises");
+
+        layout.set_focus(a);
+        assert_eq!(layout.focus, a);
+        assert_eq!(layout.tiled_focus, a, "a tiled pane becomes tiled focus");
+        assert_eq!(floating_ids(&layout), vec![first, second], "stack is kept");
+    }
+
+    #[test]
+    fn set_floating_rect_keeps_the_stacking_order() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let (bottom, top) = (PaneId::alloc(), PaneId::alloc());
+        layout.add_floating(bottom, Rect::new(0, 0, 20, 8));
+        layout.add_floating(top, Rect::new(4, 2, 20, 8));
+
+        let moved = Rect::new(1, 1, 12, 6);
+        layout.set_floating_rect(bottom, moved);
+        assert_eq!(
+            layout.floating_rects(),
+            vec![(top, Rect::new(4, 2, 20, 8)), (bottom, moved)],
+            "the updated pane keeps its place at the bottom of the stack"
+        );
+
+        let before = layout.floating_rects();
+        layout.set_floating_rect(a, moved);
+        layout.set_floating_rect(PaneId(999), moved);
+        assert_eq!(
+            layout.floating_rects(),
+            before,
+            "tiled and unknown IDs are ignored"
+        );
+    }
+
+    #[test]
+    fn floating_position_inverts_the_bottom_first_stack() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let (bottom, middle, top) = (PaneId::alloc(), PaneId::alloc(), PaneId::alloc());
+        let bottom_rect = Rect::new(0, 0, 20, 8);
+        let middle_rect = Rect::new(2, 1, 20, 8);
+        let top_rect = Rect::new(4, 2, 20, 8);
+        layout.add_floating(bottom, bottom_rect);
+        layout.add_floating(middle, middle_rect);
+        layout.add_floating(top, top_rect);
+
+        assert_eq!(layout.floating_position(top), Some((0, top_rect)));
+        assert_eq!(layout.floating_position(middle), Some((1, middle_rect)));
+        assert_eq!(layout.floating_position(bottom), Some((2, bottom_rect)));
+        assert_eq!(
+            layout.floating_position(a),
+            None,
+            "tiled panes are not floats"
+        );
+        assert_eq!(layout.floating_position(PaneId(999)), None);
+        assert_eq!(
+            layout.floating_position(middle),
+            layout
+                .floating_rects()
+                .iter()
+                .position(|(id, _)| *id == middle)
+                .map(|z| (z, middle_rect)),
+            "the position matches floating_rects order"
+        );
+    }
+
+    #[test]
+    fn pane_rect_any_resolves_tiled_and_floating_geometry() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let floating = PaneId::alloc();
+        let floating_rect = Rect::new(4, 2, 20, 8);
+        layout.add_floating(floating, floating_rect);
+        let area = Rect::new(0, 0, 80, 24);
+
+        assert_eq!(layout.floating_rect(floating), Some(floating_rect));
+        assert_eq!(layout.floating_rect(a), None, "tiled panes are not floats");
+        assert_eq!(layout.floating_rect(PaneId(999)), None);
+
+        let tiled = layout
+            .panes(area)
+            .into_iter()
+            .find(|pane| pane.id == a)
+            .expect("the tiled leaf stays in the tree")
+            .rect;
+        assert_eq!(
+            layout.pane_rect_any(area, a),
+            Some(tiled),
+            "tiled panes keep tree geometry"
+        );
+        assert_eq!(
+            layout.pane_rect_any(area, floating),
+            Some(floating_rect),
+            "floating panes keep their stored rect"
+        );
+        assert_ne!(
+            tiled, floating_rect,
+            "a floating pane never reports tree geometry"
+        );
+    }
+
+    #[test]
+    fn tiled_anchor_resolves_floating_panes_to_tiled_focus() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let floating = PaneId::alloc();
+        layout.add_floating(floating, Rect::new(4, 2, 20, 8));
+        layout.set_focus(floating);
+        let unknown = PaneId(999);
+
+        assert_eq!(layout.tiled_anchor(a), a, "a tiled pane is its own anchor");
+        assert_eq!(
+            layout.tiled_anchor(floating),
+            b,
+            "a floating pane answers from the last focused tiled pane"
+        );
+        assert_eq!(
+            layout.tiled_anchor(unknown),
+            unknown,
+            "an unknown id is returned unchanged"
+        );
+    }
+
+    #[test]
+    fn removing_the_focused_floating_pane_returns_to_tiled_focus() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let area = Rect::new(0, 0, 80, 24);
+        layout.focus_dir(area, Dir::Left);
+        assert_eq!(layout.tiled_focus, a);
+
+        let floating = PaneId::alloc();
+        layout.add_floating(floating, Rect::new(4, 2, 20, 8));
+        layout.focus = floating;
+
+        assert!(!layout.remove(floating));
+        assert_eq!(layout.focus, layout.tiled_focus);
+        assert_eq!(layout.focus, a);
+        assert!(!layout.contains(floating));
+    }
+
+    #[test]
+    fn removing_the_last_tiled_pane_reports_the_tab_empty() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let floating = PaneId::alloc();
+        layout.add_floating(floating, Rect::new(4, 2, 20, 8));
+
+        assert!(
+            layout.remove(a),
+            "a tab with no tiled leaf is empty even with floating panes"
+        );
+        assert!(
+            layout.is_floating(floating),
+            "floating bookkeeping is left to the close path"
+        );
+    }
+
+    #[test]
+    fn floating_default_size_is_half_by_a_quarter() {
+        assert_eq!(default_floating_size(Rect::new(0, 0, 120, 40)), (60, 10));
+        assert_eq!(
+            default_floating_size(Rect::new(0, 0, 4, 4)),
+            (3, 3),
+            "small areas still get the 3×3 minimum"
+        );
+    }
+
+    #[test]
+    fn floating_cascade_starts_at_four_two_and_steps() {
+        let area = Rect::new(0, 0, 120, 40);
+        let first = cascade_floating_position(area, 60, 10, None);
+        let second = cascade_floating_position(area, 60, 10, Some(first));
+        let third = cascade_floating_position(area, 60, 10, Some(second));
+        assert_eq!((first, second, third), ((4, 2), (8, 4), (12, 6)));
+
+        // With every floating pane closed the caller passes `None` again.
+        assert_eq!(cascade_floating_position(area, 60, 10, None), (4, 2));
+
+        // An axis that would pass the edge restarts, the other keeps stepping.
+        let narrow = Rect::new(0, 0, 70, 20);
+        let second = cascade_floating_position(narrow, 60, 10, Some((4, 2)));
+        let third = cascade_floating_position(narrow, 60, 10, Some(second));
+        assert_eq!(second, (8, 4));
+        assert_eq!(third, (4, 6), "x wraps while y keeps cascading");
+    }
+
+    #[test]
+    fn floating_rects_clamp_inside_the_area() {
+        let area = Rect::new(0, 0, 120, 40);
+        assert_eq!(
+            clamp_floating_rect(Rect::new(4, 2, 200, 10), area),
+            Rect::new(0, 2, 120, 10),
+            "an oversized pane shrinks to the area and moves inside"
+        );
+        assert_eq!(
+            clamp_floating_rect(Rect::new(80, 2, 40, 10), Rect::new(0, 0, 100, 30)),
+            Rect::new(60, 2, 40, 10),
+            "a pane past the right edge moves left"
+        );
+        assert_eq!(
+            clamp_floating_rect(Rect::new(0, 0, 1, 1), area),
+            Rect::new(0, 0, 3, 3),
+            "the outer size has a 3×3 minimum"
+        );
+    }
+
+    #[test]
+    fn resolved_floating_geometry_defaults_cascades_and_clamps() {
+        let area = Rect::new(0, 0, 120, 40);
+        assert_eq!(
+            resolve_floating_geometry(area, None, None, None, None, None),
+            Some(FloatGeometry {
+                rect: Rect::new(4, 2, 60, 10),
+                cascade: (4, 2),
+            })
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(20), Some(8), Some(30), None, Some((4, 2))),
+            Some(FloatGeometry {
+                rect: Rect::new(30, 4, 20, 8),
+                cascade: (30, 4),
+            }),
+            "a given x keeps its value while y cascades"
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(20), Some(8), None, Some(3), Some((4, 2))),
+            Some(FloatGeometry {
+                rect: Rect::new(8, 3, 20, 8),
+                cascade: (8, 3),
+            }),
+            "a given y keeps its value while x cascades"
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(200), Some(10), Some(80), Some(2), None),
+            Some(FloatGeometry {
+                rect: Rect::new(0, 2, 120, 10),
+                cascade: (80, 2),
+            }),
+            "the rect clamps but the cascade cursor keeps the request"
+        );
+        assert_eq!(
+            resolve_floating_geometry(area, Some(2), None, None, None, None),
+            None,
+            "a requested size below the minimum is rejected"
+        );
+    }
+
+    #[test]
+    fn a_valid_request_clamped_below_the_minimum_is_rejected() {
+        let tiny = Rect::new(0, 0, 2, 2);
+        assert_eq!(
+            resolve_floating_geometry(tiny, Some(20), Some(8), None, None, None),
+            None,
+            "the area itself is smaller than the minimum, so the clamped rect is not attachable"
+        );
+        assert_eq!(
+            resolve_floating_geometry(Rect::new(0, 0, 2, 40), Some(20), Some(8), None, None, None),
+            None,
+            "one short axis is enough to reject the clamped rect"
+        );
+    }
+
+    #[test]
+    fn directional_focus_from_a_floating_pane_starts_at_tiled_focus() {
+        let left = PaneId::alloc();
+        let mut layout = TileLayout::new(left);
+        let right = PaneId::alloc();
+        layout.split_focused(Axis::Col, right);
+        let area = Rect::new(0, 0, 80, 24);
+        layout.focus_dir(area, Dir::Left);
+        assert_eq!(layout.tiled_focus, left);
+
+        let floating = PaneId::alloc();
+        layout.add_floating(floating, Rect::new(4, 2, 20, 8));
+        layout.focus = floating;
+        layout.focus_dir(area, Dir::Right);
+        assert_eq!(layout.focus, right, "the move lands on a tiled pane");
+        assert_eq!(layout.tiled_focus, right);
+        assert_eq!(layout.neighbor(area, floating, Dir::Left), Some(left));
+    }
+
+    #[test]
+    fn apply_tree_keeps_floating_panes_and_rejects_floating_ids() {
+        let a = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        let b = PaneId::alloc();
+        layout.split_focused(Axis::Col, b);
+        let area = Rect::new(0, 0, 80, 24);
+        layout.focus_dir(area, Dir::Left);
+        assert_eq!(layout.tiled_focus, a);
+        let floating = PaneId::alloc();
+        layout.add_floating(floating, Rect::new(4, 2, 20, 8));
+        let before = layout.floating_rects();
+        layout.focus = floating;
+
+        let tiled_tree = LayoutTree::Split {
+            axis: 1,
+            ratio: 0.4,
+            a: Box::new(LayoutTree::Leaf(a.0)),
+            b: Box::new(LayoutTree::Leaf(b.0)),
+        };
+        layout.apply_tree(&tiled_tree, a).unwrap();
+        assert_eq!(layout.tiled_focus, a);
+        assert_eq!(layout.focus, floating, "a floating focus survives apply");
+        assert_eq!(layout.floating_rects(), before, "floating geometry is kept");
+
+        let tree_with_floating = LayoutTree::Split {
+            axis: 0,
+            ratio: 0.5,
+            a: Box::new(LayoutTree::Leaf(a.0)),
+            b: Box::new(LayoutTree::Leaf(floating.0)),
+        };
+        let before_tree = serde_json::to_value(layout.to_tree()).unwrap();
+        assert!(layout.apply_tree(&tree_with_floating, a).is_err());
+        assert!(
+            layout.apply_tree(&tiled_tree, floating).is_err(),
+            "a floating focus is not a valid tree focus"
+        );
+        assert_eq!(serde_json::to_value(layout.to_tree()).unwrap(), before_tree);
+        assert_eq!(layout.focus, floating);
     }
 }

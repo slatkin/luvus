@@ -96,7 +96,7 @@ impl App {
                 .filter(|(wi, _)| !self.compact || *wi == self.active_ws)
             {
                 for (ti, tab) in ws.tabs.iter().enumerate() {
-                    let panes = tab.layout.leaves();
+                    let panes = tab.layout.all_panes();
                     let pane_count = panes.len();
                     for (pi, id) in panes.into_iter().enumerate() {
                         if let Some(s) = self.status.get(&id) {
@@ -295,7 +295,7 @@ impl App {
         let mut c = [0usize; 4];
         for ws in &self.workspaces {
             for tab in &ws.tabs {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     if let Some(s) = self.status.get(&id) {
                         if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
                             match s.state {
@@ -465,6 +465,44 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn agent_rows_include_a_floating_agent_pane() {
+        use crate::app::FloatingPaneRequest;
+
+        let _env = crate::persist::test_env("switcher-floating-agent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(FloatingPaneRequest {
+                target: None,
+                width: None,
+                height: None,
+                x: None,
+                y: None,
+                title: None,
+                focus: true,
+                command: None,
+            })
+            .unwrap()
+            .pane;
+        app.status
+            .get_mut(&floating)
+            .expect("floating status")
+            .agent = "claude".to_string();
+
+        app.open_switcher();
+
+        assert!(
+            agent_targets(&app).contains(&SwitcherTarget::Pane(floating)),
+            "the floating agent is a jump target"
+        );
+        assert_eq!(
+            app.agent_state_counts(),
+            [0, 0, 0, 1],
+            "the floating agent counts in the session summary"
+        );
     }
 
     #[test]

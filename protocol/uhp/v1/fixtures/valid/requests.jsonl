@@ -57,3 +57,5 @@
 {"id":"pane-list-default","method":"pane.list","params":{}}
 {"id":"transpose-pane","method":"pane.transpose","params":{"pane":"7","if_revision":41}}
 {"id":"transpose-current","method":"pane.transpose","params":{}}
+{"id":"pane-float","method":"pane.float","params":{"pane":"7","width":40,"height":12,"x":4,"y":2,"title":"Review","focus":true,"command":["htop"]}}
+{"id":"pane-float-defaults","method":"pane.float","params":{}}

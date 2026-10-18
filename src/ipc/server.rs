@@ -236,6 +236,10 @@ struct ClientState {
     behind: bool,
     force_full: bool,
     retained_pane_content: Vec<(crate::ids::PaneId, Rect)>,
+    /// How many leading `retained_pane_content` entries are floating panes, top
+    /// first. It travels with the retained list so the damage patch never asks
+    /// the layout which panes that particular client drew.
+    retained_floating_count: usize,
     retained_hyperlinks: Vec<crate::app::RenderedHyperlink>,
     retained_ready: bool,
     last_activity: u64,
@@ -282,6 +286,7 @@ impl ClientState {
             behind: false,
             force_full: true,
             retained_pane_content: Vec::new(),
+            retained_floating_count: 0,
             retained_hyperlinks: Vec::new(),
             retained_ready: false,
             last_activity,
@@ -868,6 +873,7 @@ fn apply(
             client.force_full = true;
             client.retained_ready = false;
             client.retained_pane_content.clear();
+            client.retained_floating_count = 0;
             if *foreground == Some(id) {
                 app.commander = None;
                 *foreground = latest_client(clients);
@@ -891,6 +897,7 @@ fn apply(
             client.behind = false;
             client.retained_ready = false;
             client.retained_pane_content.clear();
+            client.retained_floating_count = 0;
             if interest == SurfaceInterest::Prepared && client.shell_dock_layout.rows > 0 {
                 client.shell_dock_dirty = true;
             }
@@ -1481,7 +1488,10 @@ fn capture_visible_terminal_generations(
     {
         return;
     }
-    let pane_ids = app.layout().leaves();
+    // Floating panes draw above the tiled layer and carry their own damage, so
+    // capture and acknowledge both layers here; the damage fast path compares
+    // the same set against its client content rects.
+    let pane_ids = app.layout().all_panes();
     generations.reserve(pane_ids.len());
     for id in pane_ids {
         let Some(pane) = app.panes.get(&id) else {
@@ -1505,7 +1515,7 @@ fn capture_visible_terminal_damage(
     {
         return;
     }
-    let pane_ids = app.layout().leaves();
+    let pane_ids = app.layout().all_panes();
     snapshots.reserve(pane_ids.len());
     for id in pane_ids {
         let Some(pane) = app.panes.get(&id) else {
@@ -1652,6 +1662,7 @@ fn render_client(
         client.last_frame = None;
         client.force_full = true;
         client.retained_ready = false;
+        client.retained_floating_count = 0;
         client.retained_hyperlinks.clear();
     }
 
@@ -1666,6 +1677,7 @@ fn render_client(
             &mut target,
             app,
             &client.retained_pane_content,
+            client.retained_floating_count,
             damage,
             &mut client.retained_hyperlinks,
         )
@@ -1743,6 +1755,7 @@ fn render_client(
             client
                 .retained_pane_content
                 .clone_from(&app.pane_content_rects);
+            client.retained_floating_count = app.pane_floating_count;
             client
                 .retained_hyperlinks
                 .clone_from(&app.rendered_hyperlinks);
@@ -1761,6 +1774,7 @@ fn render_client(
         } else {
             let projection = ui::render_projection(&mut target, app);
             client.retained_pane_content = projection.pane_content;
+            client.retained_floating_count = projection.pane_floating_count;
             client.retained_hyperlinks = projection.hyperlinks;
             client.retained_ready = true;
             app.client_shell_dock_rect = projection.shell_dock;

@@ -456,14 +456,65 @@ A hook declared on `node.created` / `node.closed` still fires for the
 [[panes]]
 id = "board"
 title = "Git board"
-placement = "split"              # overlay | split | tab
+placement = "split"              # overlay | split | tab | floating
 command = ["bun", "run", "board.ts"]
 ```
 
 Open with `luvus module pane open <module-id> board`. It becomes a real luvus
 pane (a TUI, a log tail, anything), runs in the module root with the full
 `LUVUS_*` environment, and is auto-untracked on close. A module pane that's
-open when you detach is re-opened on the next launch.
+open when you detach is re-opened on the next launch. Without `--placement` it
+opens as a split, unless the entry placement is `floating` (see below).
+
+#### Floating panes and prompt dialogs
+
+`placement = "floating"` opens the entry as a floating pane above the tab's
+tiled layout instead of changing that layout. The optional `width`, `height`,
+`x` and `y` fields are integers in cells:
+
+```toml
+id = "you.prompt"
+name = "Prompt"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[panes]]
+id = "prompt"
+title = "Pick a branch"
+placement = "floating"
+width = 60
+height = 8
+x = 10
+y = 3
+command = ["sh", "prompt.sh"]
+```
+
+- `width` and `height` are the outer size, border included. When omitted, the
+  pane uses half the tab width and a quarter of the tab height.
+- `x` and `y` are the top-left corner relative to the tab's pane area. When
+  omitted, the pane cascades from (4, 2) in steps of 4 and 2, and restarts at
+  4 or 2 when the next position would pass the edge.
+- The minimum outer size is 3 by 3 cells. A smaller `width` or `height` is
+  rejected before the command starts; a larger size is clamped to the pane
+  area.
+- The entry `title` is shown in the pane's top border.
+- A floating pane closes when its command exits, and focus returns to the pane
+  that had it before.
+- Floating placement works only in a tab that holds panes. Git, ORCH and
+  Mission Control tabs reject it.
+
+Use this for a **prompt dialog**: a short-lived floating command that asks for
+one choice (a branch, a task, a name), acts on it, and exits. The pane takes
+focus when it opens, so typing goes to the prompt; when the command exits, the
+pane closes and focus returns to where the user was. Floating panes are not
+modal in input routing: the prefix key, its bindings and direct shortcuts keep
+working while the prompt is open.
+
+A manifest entry `placement` applies without a flag only when it is `floating`.
+For a `tab`, `overlay`, `split` or other entry value, it only documents the
+intended placement: without a flag the pane opens as a split, as module panes
+did before floating panes. An explicit `--placement` (passed to
+`luvus module pane open`, or by an action) always wins.
 
 ### `[[docks]]`: a panel in the sidebar
 

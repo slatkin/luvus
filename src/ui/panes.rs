@@ -8,6 +8,11 @@ use super::*;
 /// lifetime ID remains visible and addressable. Path visibility is a separate
 /// presentation choice shared by both renderers.
 fn terminal_pane_title(app: &App, id: PaneId, cwd: &Path, max_width: u16) -> String {
+    // A floating pane shows the title its create request gave, else the title a
+    // tiled pane with the same command would show.
+    if let Some(title) = app.floating_title(id) {
+        return truncate(title, max_width as usize);
+    }
     let identity = app
         .agent_name_for(id)
         .map(ToOwned::to_owned)
@@ -318,6 +323,9 @@ fn project_hover_file_hyperlink(
     }
 }
 
+/// A rendered terminal cursor: (column, row, visible).
+pub(super) type PaneCursor = Option<(u16, u16, bool)>;
+
 pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -325,7 +333,7 @@ pub(super) fn draw_panes(
     lone_header: bool,
     app: &mut App,
     t: &Theme,
-) -> Option<(u16, u16, bool)> {
+) -> PaneCursor {
     let focus = app.layout().focus;
     let mut cursor = None;
     let mut diff_source_rects = Vec::new();
@@ -342,7 +350,8 @@ pub(super) fn draw_panes(
             rendered_hyperlinks: &mut rendered_hyperlinks,
         };
         for (id, rect) in rects {
-            if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, &mut context, t) {
+            let content = pane_content(*rect, bordered, context.app.compact, lone_header);
+            if let Some(c) = draw_one_pane(f, *rect, content, *id, *id == focus, &mut context, t) {
                 cursor = Some(c);
             }
         }
@@ -355,6 +364,66 @@ pub(super) fn draw_panes(
     cursor
 }
 
+/// Draw the active tab's floating panes, bottom to top, above the tiled layer.
+///
+/// A floating pane covers whatever is under it, so each one clears its whole
+/// outer rect first, then paints content, border and title. Floating panes are
+/// ordinary PTY panes, so the diff/preview hit lists stay empty; terminal
+/// hyperlinks are appended to the ones the tiled pass already recorded.
+///
+/// Title hit rects come back in hit-test order (topmost first), so the caller
+/// can lead `App::pane_title_rects` with the panes drawn last.
+pub(super) fn draw_floating_panes(
+    f: &mut RenderTarget,
+    rects: &[(PaneId, Rect)],
+    focus: PaneId,
+    app: &mut App,
+    t: &Theme,
+) -> (PaneCursor, Vec<(PaneId, Rect)>) {
+    let show_titles = app.config.layout.show_titles;
+    let mut cursor = None;
+    let mut title_rects = Vec::new();
+    let mut diff_source_rects = Vec::new();
+    let mut diff_note_rects = Vec::new();
+    let mut preview_link_rects = Vec::new();
+    let mut rendered_hyperlinks = Vec::new();
+    {
+        let mut context = PaneRenderContext {
+            app,
+            lone_header: false,
+            diff_source_rects: &mut diff_source_rects,
+            diff_note_rects: &mut diff_note_rects,
+            preview_link_rects: &mut preview_link_rects,
+            rendered_hyperlinks: &mut rendered_hyperlinks,
+        };
+        for (id, rect) in rects {
+            // Clear border cells too: the pane below must not show through.
+            f.render_widget(Block::new().style(Style::new().bg(t.mantle)), *rect);
+            let focused = *id == focus;
+            let content = floating_pane_content(*rect);
+            if let Some(c) = draw_one_pane(f, *rect, content, *id, focused, &mut context, t) {
+                cursor = Some(c);
+            }
+            // A floating pane is always bordered, and its title sits on that
+            // border row whether or not the tiled layer is split.
+            borders::render_pane_borders(f, &[(*id, *rect)], focused.then_some(*id), None, t);
+            if show_titles {
+                title_rects.extend(draw_pane_titles(f, &[(*id, *rect)], focus, context.app, t));
+            }
+        }
+    }
+    app.diff_source_rects.extend(diff_source_rects);
+    app.diff_note_rects.extend(diff_note_rects);
+    app.preview_link_rects.extend(preview_link_rects);
+    if !rendered_hyperlinks.is_empty() {
+        app.rendered_hyperlinks.append(&mut rendered_hyperlinks);
+        app.rendered_hyperlinks
+            .sort_by_key(|link| (link.y, link.start, link.pane.0));
+    }
+    title_rects.reverse();
+    (cursor, title_rects)
+}
+
 /// Patch only terminal rows captured by the VT damage ledger into a retained
 /// client buffer. The caller has already proved that geometry and every
 /// non-terminal layer are unchanged. Any uncertainty returns `Err(())` and the
@@ -363,83 +432,33 @@ pub(super) fn patch_terminal_damage(
     f: &mut RenderTarget,
     app: &App,
     content_rects: &[(PaneId, Rect)],
+    floating_count: usize,
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
     hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
-    let leaves = app.layout().leaves();
-    if leaves.len() != content_rects.len()
-        || leaves.iter().any(|id| app.views.contains_key(id))
-        || leaves
-            .iter()
-            .any(|id| !snapshots.contains_key(id) || !app.panes.contains_key(id))
-    {
+    let layout = app.layout();
+    let panes = layout.all_panes();
+    if !damage_covers_every_pane(app, &panes, content_rects, snapshots) {
         return Err(());
     }
-
-    let theme = &app.theme;
-    let focus = app.layout().focus;
+    // The retained list leads with every floating pane the frame drew, top
+    // first, so its prefix is the floating stack. Keep the count with the list:
+    // an overflow means the retained geometry is stale, not patchable.
+    let floating = content_rects.get(..floating_count).ok_or(())?;
     let mut cursor = None;
-    for id in leaves {
-        let content = content_rects
-            .iter()
-            .find_map(|(candidate, rect)| (*candidate == id).then_some(*rect))
-            .ok_or(())?;
+    for (index, &(id, content)) in content_rects.iter().enumerate() {
         let snapshot = snapshots.get(&id).ok_or(())?;
-        if snapshot.kind != crate::terminal::vt::DamageKind::Partial
-            || snapshot.composer_region.is_some()
-            || snapshot.scroll_offset != 0
-            || app
-                .status
-                .get(&id)
-                .is_some_and(|status| status.agent == "pi")
-        {
-            return Err(());
-        }
-
-        let blank = Style::new().bg(theme.mantle);
-        let buffer = f.buffer_mut();
-        let mut stack = [0u8; 4];
-        let mut combined = String::new();
-        for row in &snapshot.rows {
-            if row.row >= content.height {
-                continue;
-            }
-            let y = content.y + row.row;
-            hyperlinks.retain(|link| !(link.pane == id && link.y == y));
-            for x in content.x..content.x.saturating_add(content.width) {
-                let cell = &mut buffer[(x, y)];
-                cell.reset();
-                cell.set_symbol(" ");
-                cell.set_style(blank);
-            }
-            for cell in &row.cells {
-                let style = terminal_cell_style(cell.style, theme, app.downsample);
-                let symbol: &str = if cell.zero_width.is_empty() {
-                    cell.character.encode_utf8(&mut stack)
-                } else {
-                    combined.clear();
-                    combined.push(cell.character);
-                    combined.extend(cell.zero_width.iter());
-                    &combined
-                };
-                paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
-            }
-            for hyperlink in &row.hyperlinks {
-                let start = hyperlink.start.min(content.width);
-                let end = hyperlink.end.min(content.width);
-                if start < end {
-                    push_rendered_hyperlink(
-                        hyperlinks,
-                        id,
-                        content.x + start,
-                        y,
-                        end - start,
-                        &hyperlink.uri,
-                    );
-                }
-            }
-        }
-        if id == focus {
+        // Panes drawn above this one: every floating pane for a tiled pane, and
+        // the higher floating entries for a floating one. Patching a row clears
+        // the whole content row before it paints the damaged cells, so any
+        // covered cell in that row — not only the damaged ones — would be
+        // erased. Fall back to the full renderer instead of leaving holes in the
+        // pane above.
+        let covered = |row_rect: Rect| {
+            row_covered_by_floating(floating, index < floating_count, index, row_rect)
+        };
+        patch_pane_damage(f, app, id, content, snapshot, &covered, hyperlinks)?;
+        if id == layout.focus {
             cursor = pane_ime_cursor(content, snapshot.cursor);
         }
     }
@@ -451,12 +470,136 @@ pub(super) fn patch_terminal_damage(
     Ok(())
 }
 
+/// The damage ledger must describe exactly this frame's live panes: same count,
+/// no native views, and a snapshot and content rect for every pane.
+fn damage_covers_every_pane(
+    app: &App,
+    panes: &[PaneId],
+    content_rects: &[(PaneId, Rect)],
+    snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
+) -> bool {
+    panes.len() == content_rects.len()
+        && !panes.iter().any(|id| app.views.contains_key(id))
+        && !panes
+            .iter()
+            .any(|id| !snapshots.contains_key(id) || !app.panes.contains_key(id))
+        && !panes
+            .iter()
+            .any(|id| !content_rects.iter().any(|(pane, _)| pane == id))
+}
+
+/// The rect a floating pane draws into, derived from the client's own content
+/// geometry. A floating pane always paints a border, so its drawn rect is its
+/// content rect expanded by one cell; deriving it here keeps the overlap test
+/// true for a passive render, which clamps for drawing only and never stores its
+/// rects in `App::pane_rects`.
+fn floating_drawn_rect(content: Rect) -> Rect {
+    Rect::new(
+        content.x.saturating_sub(1),
+        content.y.saturating_sub(1),
+        content.width.saturating_add(2),
+        content.height.saturating_add(2),
+    )
+}
+
+/// Whether a floating pane drawn above `content_rects[index]` covers any cell of
+/// `row_rect`. `floating` is the retained content list's floating prefix, top
+/// first, so a competitor's index is its stacking order; `id_floating` says
+/// whether the patched pane itself is in that prefix.
+fn row_covered_by_floating(
+    floating: &[(PaneId, Rect)],
+    id_floating: bool,
+    index: usize,
+    row_rect: Rect,
+) -> bool {
+    floating
+        .iter()
+        .enumerate()
+        .any(|(other_index, (_, content))| {
+            (!id_floating || other_index < index)
+                && row_rect.intersects(floating_drawn_rect(*content))
+        })
+}
+
+/// Patch one pane's damaged rows into the retained buffer.
+fn patch_pane_damage(
+    f: &mut RenderTarget,
+    app: &App,
+    id: PaneId,
+    content: Rect,
+    snapshot: &crate::terminal::vt::DamageSnapshot,
+    covered: &impl Fn(Rect) -> bool,
+    hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
+) -> Result<(), ()> {
+    if snapshot.kind != crate::terminal::vt::DamageKind::Partial
+        || snapshot.composer_region.is_some()
+        || snapshot.scroll_offset != 0
+        || app
+            .status
+            .get(&id)
+            .is_some_and(|status| status.agent == "pi")
+    {
+        return Err(());
+    }
+
+    let theme = &app.theme;
+    let blank = Style::new().bg(theme.mantle);
+    let buffer = f.buffer_mut();
+    let mut stack = [0u8; 4];
+    let mut combined = String::new();
+    for row in &snapshot.rows {
+        if row.row >= content.height {
+            continue;
+        }
+        let y = content.y + row.row;
+        if covered(Rect::new(content.x, y, content.width, 1)) {
+            return Err(());
+        }
+        hyperlinks.retain(|link| !(link.pane == id && link.y == y));
+        for x in content.x..content.x.saturating_add(content.width) {
+            let cell = &mut buffer[(x, y)];
+            cell.reset();
+            cell.set_symbol(" ");
+            cell.set_style(blank);
+        }
+        for cell in &row.cells {
+            let style = terminal_cell_style(cell.style, theme, app.downsample);
+            let symbol: &str = if cell.zero_width.is_empty() {
+                cell.character.encode_utf8(&mut stack)
+            } else {
+                combined.clear();
+                combined.push(cell.character);
+                combined.extend(cell.zero_width.iter());
+                &combined
+            };
+            paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
+        }
+        for hyperlink in &row.hyperlinks {
+            let start = hyperlink.start.min(content.width);
+            let end = hyperlink.end.min(content.width);
+            if start < end {
+                push_rendered_hyperlink(
+                    hyperlinks,
+                    id,
+                    content.x + start,
+                    y,
+                    end - start,
+                    &hyperlink.uri,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Draw one pane into `area`. `content` is its terminal area, computed by the
+/// caller because a floating pane uses a smaller minimum than a tiled one.
 fn draw_one_pane(
     f: &mut RenderTarget,
     area: Rect,
+    content: Option<Rect>,
     id: PaneId,
     focused: bool,
-    bordered: bool,
     context: &mut PaneRenderContext<'_>,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
@@ -464,7 +607,7 @@ fn draw_one_pane(
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
     if let Some(view) = app.views.get(&id) {
-        let content = pane_content(area, bordered, app.compact, lone_header)?;
+        let content = content?;
         match view {
             crate::app::ViewKind::File(v) => {
                 let sel = app.selection.filter(|s| s.pane == id);
@@ -499,7 +642,7 @@ fn draw_one_pane(
     }
     let pane = app.panes.get(&id)?;
     let st = pane_state(app, id);
-    let content = pane_content(area, bordered, app.compact, lone_header)?;
+    let content = content?;
 
     // A lone pane has no border, so it shows a header bar on its top row.
     // Bordered panes instead get their dot+path+close as a title ON the top
@@ -1106,5 +1249,352 @@ mod tests {
         assert_eq!(buf[(11, 1)].bg, t.accent);
         assert_eq!(buf[(12, 1)].bg, ratatui::style::Color::Reset);
         assert_eq!(buf[(6, 1)].fg, t.base);
+    }
+    use crate::terminal::appearance::PaneAppearance;
+    use crate::terminal::vt::{create_engine, DamageSnapshot, VtEngineKind};
+    use std::collections::HashMap;
+
+    fn install_engine(
+        app: &mut App,
+        pane: PaneId,
+        text: &str,
+        cols: u16,
+        rows: u16,
+    ) -> std::sync::Arc<std::sync::Mutex<dyn crate::terminal::vt::VtEngine>> {
+        let (responses, _responses_rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            cols,
+            rows,
+            responses,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        engine.lock().expect("engine lock").advance(text.as_bytes());
+        app.panes.get_mut(&pane).expect("pane exists").engine = engine.clone();
+        engine
+    }
+
+    /// Acknowledge the damage every pane's engine starts with, so the next
+    /// snapshot of an undisturbed pane is `Partial` with no rows.
+    fn settle_damage(app: &App) {
+        for pane in app.panes.values() {
+            let Ok(mut engine) = pane.engine.lock() else {
+                continue;
+            };
+            let snapshot = engine.damage_snapshot();
+            let _ = engine.acknowledge_damage(snapshot.generation);
+            engine.recycle_damage_snapshot(snapshot);
+        }
+    }
+
+    fn damage_snapshots(app: &App) -> HashMap<PaneId, DamageSnapshot> {
+        app.layout()
+            .all_panes()
+            .into_iter()
+            .filter_map(|id| {
+                let mut engine = app.panes.get(&id)?.engine.lock().ok()?;
+                Some((id, engine.damage_snapshot()))
+            })
+            .collect()
+    }
+
+    fn recycle_snapshots(app: &App, snapshots: HashMap<PaneId, DamageSnapshot>) {
+        for (id, snapshot) in snapshots {
+            if let Some(pane) = app.panes.get(&id) {
+                pane.engine
+                    .lock()
+                    .expect("engine lock")
+                    .recycle_damage_snapshot(snapshot);
+            }
+        }
+    }
+
+    /// A floating pane's own output goes through the damage fast path: the patch
+    /// reproduces exactly what a full render would draw.
+    #[test]
+    fn damage_path_patches_a_floating_panes_output() {
+        let _env = crate::persist::test_env("floating-damage-patch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).expect("app starts");
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 40, 8)),
+                None,
+                true,
+                None,
+            ))
+            .expect("floating pane")
+            .pane;
+        let _tiled_engine = install_engine(&mut app, tiled, "tiled", 60, 20);
+        let floating_engine = install_engine(&mut app, floating, "", 40, 8);
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut retained = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut retained, area), &mut app);
+        let content_rects = app.pane_content_rects.clone();
+        settle_damage(&app);
+
+        floating_engine
+            .lock()
+            .expect("engine lock")
+            .advance(b"hello");
+        let snapshots = damage_snapshots(&app);
+        assert_eq!(
+            snapshots[&floating].kind,
+            crate::terminal::vt::DamageKind::Partial,
+            "a floating pane carries partial damage"
+        );
+        assert!(!snapshots[&floating].rows.is_empty());
+
+        let mut hyperlinks = app.rendered_hyperlinks.clone();
+        let cursor = {
+            let mut target = RenderTarget::new(&mut retained, area);
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                app.pane_floating_count,
+                &snapshots,
+                &mut hyperlinks,
+            )
+            .expect("floating damage is patchable");
+            (target.cursor(), target.cursor_visible())
+        };
+
+        let mut forced = Buffer::empty(area);
+        let full_cursor = {
+            let mut target = RenderTarget::new(&mut forced, area);
+            render_into(&mut target, &mut app);
+            (target.cursor(), target.cursor_visible())
+        };
+        assert_eq!(retained, forced, "the patch matches a full render");
+        assert_eq!(hyperlinks, app.rendered_hyperlinks);
+        assert_eq!(cursor, full_cursor);
+        recycle_snapshots(&app, snapshots);
+    }
+
+    /// A damaged tiled row covered by a floating pane cannot be patched in place:
+    /// the patch clears the whole row, which would erase the floating pane above.
+    /// The caller must fall back to the full renderer. A damaged row that no
+    /// floating pane covers still patches normally.
+    #[test]
+    fn an_overlapped_tiled_pane_falls_back_to_the_full_render() {
+        let _env = crate::persist::test_env("floating-damage-overlap");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).expect("app starts");
+        let tiled = app.layout().focus;
+        let floating = app
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 40, 8)),
+                None,
+                true,
+                None,
+            ))
+            .expect("floating pane")
+            .pane;
+        let tiled_engine = install_engine(&mut app, tiled, "tiled", 60, 20);
+        let _floating_engine = install_engine(&mut app, floating, "floating", 40, 8);
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut retained = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut retained, area), &mut app);
+        let content_rects = app.pane_content_rects.clone();
+        settle_damage(&app);
+
+        let content = content_rects
+            .iter()
+            .find(|(id, _)| *id == tiled)
+            .map(|(_, rect)| *rect)
+            .expect("tiled content rect");
+        let float_rect = app
+            .pane_rects
+            .iter()
+            .find(|(id, _)| *id == floating)
+            .map(|(_, rect)| *rect)
+            .expect("floating hit rect");
+        // The first content row of the floating pane sits on a tiled row.
+        let covered_row = (float_rect.y + 1)
+            .saturating_sub(content.y)
+            .min(content.height.saturating_sub(1));
+
+        // An uncovered row still patches.
+        tiled_engine
+            .lock()
+            .expect("engine lock")
+            .advance(b"\x1b[1;1HX");
+        let snapshots = damage_snapshots(&app);
+        assert!(snapshots[&tiled].rows.iter().any(|row| row.row == 0));
+        let mut hyperlinks = app.rendered_hyperlinks.clone();
+        {
+            let mut patched = retained.clone();
+            let mut target = RenderTarget::new(&mut patched, area);
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                app.pane_floating_count,
+                &snapshots,
+                &mut hyperlinks,
+            )
+            .expect("an uncovered tiled row is patchable");
+        }
+        recycle_snapshots(&app, snapshots);
+        settle_damage(&app);
+
+        // A covered row forces the full render.
+        tiled_engine
+            .lock()
+            .expect("engine lock")
+            .advance(format!("\x1b[{};1HY", covered_row + 1).as_bytes());
+        let snapshots = damage_snapshots(&app);
+        assert!(
+            snapshots[&tiled]
+                .rows
+                .iter()
+                .any(|row| row.row == covered_row),
+            "the damaged row is the one the floating pane covers"
+        );
+        let mut patched = retained.clone();
+        let mut target = RenderTarget::new(&mut patched, area);
+        assert_eq!(
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                app.pane_floating_count,
+                &snapshots,
+                &mut hyperlinks,
+            ),
+            Err(()),
+            "an overlapped tiled row falls back to the full render"
+        );
+        recycle_snapshots(&app, snapshots);
+    }
+
+    /// Floating panes occlude each other by stacking order: a damaged row of the
+    /// lower pane that the higher pane covers must fall back to the full
+    /// renderer, while the lower pane's uncovered rows still patch in place.
+    #[test]
+    fn a_lower_floating_pane_falls_back_only_on_covered_rows() {
+        let _env = crate::persist::test_env("floating-damage-stack");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).expect("app starts");
+        let tiled = app.layout().focus;
+        let lower = app
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((10, 4, 40, 8)),
+                None,
+                true,
+                None,
+            ))
+            .expect("lower floating pane")
+            .pane;
+        let upper = app
+            .float_pane(crate::app::FloatingPaneRequest::test(
+                None,
+                Some((20, 6, 40, 8)),
+                None,
+                true,
+                None,
+            ))
+            .expect("upper floating pane")
+            .pane;
+        let _tiled_engine = install_engine(&mut app, tiled, "tiled", 60, 20);
+        let lower_engine = install_engine(&mut app, lower, "", 38, 6);
+        let _upper_engine = install_engine(&mut app, upper, "", 38, 6);
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut retained = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut retained, area), &mut app);
+        let content_rects = app.pane_content_rects.clone();
+        let floating_count = app.pane_floating_count;
+        assert_eq!(floating_count, 2, "both floating panes were drawn");
+        settle_damage(&app);
+
+        let content_of = |id: PaneId| {
+            content_rects
+                .iter()
+                .find(|(candidate, _)| *candidate == id)
+                .map(|(_, rect)| *rect)
+                .expect("content rect")
+        };
+        let lower_content = content_of(lower);
+        let upper_content = content_of(upper);
+        // The upper pane's border starts one row above its content, so the lower
+        // pane's first row is clear of it while the upper content row is covered.
+        let uncovered_row = lower_content.y;
+        let covered_row = upper_content.y;
+        assert!(
+            uncovered_row < upper_content.y.saturating_sub(1),
+            "the lower row sits above the upper pane's border"
+        );
+        assert!(
+            (lower_content.y..lower_content.bottom()).contains(&covered_row),
+            "the upper content row overlaps the lower pane"
+        );
+
+        lower_engine
+            .lock()
+            .expect("engine lock")
+            .advance(b"\x1b[1;1HX");
+        let snapshots = damage_snapshots(&app);
+        let uncovered_index = uncovered_row - lower_content.y;
+        assert!(snapshots[&lower]
+            .rows
+            .iter()
+            .any(|row| row.row == uncovered_index));
+        let mut hyperlinks = app.rendered_hyperlinks.clone();
+        let mut patched = retained.clone();
+        {
+            let mut target = RenderTarget::new(&mut patched, area);
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                floating_count,
+                &snapshots,
+                &mut hyperlinks,
+            )
+            .expect("an uncovered lower floating row is patchable");
+        }
+        recycle_snapshots(&app, snapshots);
+        settle_damage(&app);
+
+        let mut forced = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut forced, area), &mut app);
+        assert_eq!(patched, forced, "the patch matches a full render");
+
+        let covered_index = covered_row - lower_content.y;
+        lower_engine
+            .lock()
+            .expect("engine lock")
+            .advance(format!("\x1b[{};1HY", covered_index + 1).as_bytes());
+        let snapshots = damage_snapshots(&app);
+        assert!(
+            snapshots[&lower]
+                .rows
+                .iter()
+                .any(|row| row.row == covered_index),
+            "the damaged row is the one the upper floating pane covers"
+        );
+        let mut target = RenderTarget::new(&mut patched, area);
+        assert_eq!(
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                floating_count,
+                &snapshots,
+                &mut hyperlinks,
+            ),
+            Err(()),
+            "a covered lower floating row falls back to the full render"
+        );
+        recycle_snapshots(&app, snapshots);
     }
 }

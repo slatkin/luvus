@@ -880,7 +880,7 @@ fn snapshot_layout(
                 tabs.push(TabSnap {
                     id: tab.id.clone(),
                     tree: tab.layout.to_tree(),
-                    focus: tab.layout.focus.0,
+                    focus: tab.layout.tiled_focus.0,
                     panes: Vec::new(),
                     git: true,
                     orch: false,
@@ -894,7 +894,7 @@ fn snapshot_layout(
                 tabs.push(TabSnap {
                     id: tab.id.clone(),
                     tree: tab.layout.to_tree(),
-                    focus: tab.layout.focus.0,
+                    focus: tab.layout.tiled_focus.0,
                     panes: Vec::new(),
                     git: false,
                     orch: true,
@@ -908,7 +908,7 @@ fn snapshot_layout(
                 tabs.push(TabSnap {
                     id: tab.id.clone(),
                     tree: tab.layout.to_tree(),
-                    focus: tab.layout.focus.0,
+                    focus: tab.layout.tiled_focus.0,
                     panes: Vec::new(),
                     git: false,
                     orch: false,
@@ -1055,7 +1055,10 @@ fn snapshot_layout(
             tabs.push(TabSnap {
                 id: tab.id.clone(),
                 tree: tab.layout.to_tree(),
-                focus: tab.layout.focus.0,
+                // Floating panes are not persisted, so the saved focus must be
+                // the tree-only one; `focus` could name a floating pane that the
+                // snapshot does not contain.
+                focus: tab.layout.tiled_focus.0,
                 panes,
                 git: false,
                 orch: false,
@@ -1185,6 +1188,80 @@ pub fn load() -> Option<SessionSnapshot> {
 #[cfg(test)]
 mod diff_snap_schema_tests {
     use super::*;
+
+    /// A snapshot from the previous schema (before floating panes existed) has
+    /// no floating-pane data and needs no new field to load. Its written focus
+    /// still names a tree leaf, and it round-trips unchanged.
+    #[test]
+    fn previous_schema_session_snapshot_loads_unchanged() {
+        let fixture = serde_json::json!({
+            "version": 1,
+            "active_ws": 0,
+            "workspaces": [{
+                "id": "workspace_previous",
+                "name": "luvus",
+                "cwd": "/tmp/luvus-previous",
+                "active_tab": 0,
+                "tabs": [{
+                    "id": "tab_previous",
+                    "tree": {
+                        "Split": {
+                            "axis": 0,
+                            "ratio": 0.5,
+                            "a": {"Leaf": 4},
+                            "b": {"Leaf": 7},
+                        }
+                    },
+                    "focus": 7,
+                    "panes": [
+                        [4, {
+                            "cwd": "/tmp/luvus-previous",
+                            "command": "/bin/zsh",
+                            "name": null,
+                            "agent_session": null,
+                            "agent_launch": null,
+                            "module": null,
+                            "file": null,
+                            "diff": null,
+                            "preview": null,
+                        }],
+                        [7, {
+                            "cwd": "/tmp/luvus-previous",
+                            "command": "/bin/zsh",
+                            "name": null,
+                            "agent_session": null,
+                            "agent_launch": null,
+                            "module": null,
+                            "file": null,
+                            "diff": null,
+                            "preview": null,
+                        }],
+                    ],
+                    "git": false,
+                    "orch": false,
+                    "mission": false,
+                    "name": null,
+                }],
+                "pinned": false,
+            }],
+        });
+        let snapshot: SessionSnapshot = serde_json::from_value(fixture.clone())
+            .expect("an old snapshot needs no floating-pane field");
+        assert_eq!(snapshot.version, 1);
+        assert_eq!(snapshot.active_ws, 0);
+        assert!(snapshot.closed_workspace_paths.is_empty());
+        let tab = &snapshot.workspaces[0].tabs[0];
+        assert_eq!(snapshot.workspaces[0].active_tab, 0);
+        assert_eq!(tab.focus, 7, "the written focus is kept as written");
+        assert_eq!(tab.panes.len(), 2);
+        assert!(!tab.git && !tab.orch && !tab.mission);
+        assert!(tab.name.is_none());
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap(),
+            fixture,
+            "the previous schema loads and writes back unchanged"
+        );
+    }
 
     #[test]
     fn older_sessions_default_to_no_closed_workspace_paths() {
@@ -1369,6 +1446,202 @@ mod tests {
             .iter()
             .flat_map(|tab| &tab.panes)
             .all(|(_, pane)| pane.screen.is_none())));
+    }
+
+    /// The saved tree and focus stay tiled: a focused floating pane is never
+    /// written as a leaf, a pane entry, a screen, or the tab focus, and a
+    /// restart restores the tab's tiled panes with the tiled focus.
+    #[test]
+    fn restart_with_a_floating_pane_open_restores_only_tiled_panes() {
+        fn tree_leaves(tree: &LayoutTree) -> Vec<u32> {
+            match tree {
+                LayoutTree::Leaf(id) => vec![*id],
+                LayoutTree::Split { a, b, .. } => {
+                    let mut leaves = tree_leaves(a);
+                    leaves.extend(tree_leaves(b));
+                    leaves
+                }
+            }
+        }
+
+        let _env = test_env("floating-pane-restart");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        app.dispatch("pane.split", &serde_json::json!({}))
+            .expect("split the tab");
+        let second = app.layout().focus;
+        app.dispatch(
+            "pane.focus",
+            &serde_json::json!({"pane": first.0.to_string()}),
+        )
+        .expect("focus the first tiled pane");
+        let tiled = vec![first, second];
+        assert_eq!(app.layout().leaves(), tiled);
+        assert_eq!(app.layout().tiled_focus, first);
+
+        let created = app
+            .dispatch(
+                "pane.float",
+                &serde_json::json!({"width": 20, "height": 6, "focus": true}),
+            )
+            .expect("create a floating pane");
+        let floating = PaneId(created["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.layout().focus, floating);
+        assert_eq!(app.layout().tiled_focus, first);
+        app.panes
+            .get(&floating)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"LUVUS-FLOATING-ONLY-MARKER");
+
+        assert!(save(&app));
+        let raw = fs::read_to_string(session_path()).unwrap();
+        assert!(
+            !raw.contains("LUVUS-FLOATING-ONLY-MARKER"),
+            "a floating pane screen is never written"
+        );
+        let saved: SessionSnapshot = serde_json::from_str(&raw).unwrap();
+        let tab = &saved.workspaces[0].tabs[0];
+        let tiled_raw: Vec<u32> = tiled.iter().map(|id| id.0).collect();
+        assert_eq!(tab.focus, first.0, "the tab focus is the tiled focus");
+        assert_eq!(tree_leaves(&tab.tree), tiled_raw, "no floating tree leaf");
+        assert_eq!(
+            tab.panes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            tiled_raw,
+            "no pane entry belongs to the floating pane"
+        );
+
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let restored = App::restore_or_new(80, 24, tx2).expect("the restart restores the session");
+        let layout = restored.layout();
+        assert_eq!(layout.leaves().len(), 2, "both tiled panes return");
+        assert_eq!(layout.len(), 2, "no floating pane returns");
+        assert_eq!(layout.focus, layout.tiled_focus, "focus is a tiled pane");
+        let focused_index = tiled
+            .iter()
+            .position(|id| *id == first)
+            .expect("the first tiled pane is in the tab");
+        assert_eq!(
+            layout.leaves()[focused_index],
+            layout.focus,
+            "focus returns to the saved tiled focus"
+        );
+        assert_eq!(restored.panes.len(), 2);
+    }
+
+    /// A tiled and a floating agent are equally live, but only the tiled one is
+    /// persisted: the live snapshot, agent list and terminal inventory include
+    /// both, while the saved file carries the tiled pane and its resume
+    /// metadata only.
+    #[test]
+    fn floating_agent_is_live_but_not_persisted() {
+        let _env = test_env("floating-agent-live-vs-persisted");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let tiled = app.layout().focus;
+        let shell = crate::platform::resolve_shell(&app.config.shell);
+        let floating = app
+            .float_pane(crate::app::FloatingPaneRequest {
+                target: None,
+                width: Some(20),
+                height: Some(6),
+                x: Some(4),
+                y: Some(2),
+                title: None,
+                focus: true,
+                command: Some(vec![shell]),
+            })
+            .expect("the floating agent terminal spawns")
+            .pane;
+        for (pane, session) in [(tiled, "sess-tiled"), (floating, "sess-floating")] {
+            let status = app.status.get_mut(&pane).expect("the pane has status");
+            status.agent = "claude".into();
+            status.state = crate::ui::theme::State::Working;
+            status.agent_session = Some(crate::app::AgentSession {
+                agent: "claude".into(),
+                session_id: session.into(),
+            });
+        }
+
+        let snapshot = app
+            .dispatch("session.snapshot", &serde_json::json!({}))
+            .expect("the live snapshot succeeds");
+        let rows = snapshot["workspaces"][0]["tabs"][0]["panes"]
+            .as_array()
+            .expect("the tab has snapshot rows");
+        let row = |pane: PaneId| {
+            let pane_id = pane.0.to_string();
+            rows.iter()
+                .find(|row| row["pane_id"].as_str() == Some(pane_id.as_str()))
+                .expect("the pane is in the live snapshot")
+        };
+        assert_eq!(row(tiled)["agent_session"], "sess-tiled");
+        assert_eq!(row(floating)["agent_session"], "sess-floating");
+        assert_eq!(row(floating)["floating"], true);
+
+        let agents = app
+            .dispatch("agent.list", &serde_json::json!({}))
+            .expect("the agent list succeeds");
+        let listed: Vec<&str> = agents["agents"]
+            .as_array()
+            .expect("the agent list has rows")
+            .iter()
+            .filter_map(|row| row["pane"].as_str())
+            .collect();
+        for pane in [tiled, floating] {
+            let pane_id = pane.0.to_string();
+            assert!(
+                listed.contains(&pane_id.as_str()),
+                "agent.list includes p{pane_id}"
+            );
+        }
+
+        let (reply, _response) = std::sync::mpsc::channel();
+        let inventory: serde_json::Value =
+            serde_json::from_str(&app.handle_api(&crate::ipc::api::ApiRequest {
+                id: "inventory".into(),
+                method: "terminal.backend.inventory".into(),
+                params: serde_json::json!({}),
+                reply,
+            }))
+            .expect("the inventory response is JSON");
+        let terminals = inventory["result"]["terminals"]
+            .as_array()
+            .expect("the inventory has terminals");
+        for pane in [tiled, floating] {
+            let pane_id = pane.0.to_string();
+            assert!(
+                terminals
+                    .iter()
+                    .any(|terminal| terminal["pane_id"].as_str() == Some(pane_id.as_str())),
+                "the inventory includes p{pane_id}"
+            );
+        }
+
+        assert!(save(&app));
+        let raw = fs::read_to_string(session_path()).unwrap();
+        assert!(
+            !raw.contains("sess-floating"),
+            "the floating agent resume metadata is never written"
+        );
+        let saved: SessionSnapshot = serde_json::from_str(&raw).unwrap();
+        let saved_tiled = &saved.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .find(|(id, _)| *id == tiled.0)
+            .expect("the tiled agent is saved")
+            .1;
+        assert_eq!(
+            saved_tiled
+                .agent_session
+                .as_ref()
+                .map(|(agent, session)| (agent.as_str(), session.as_str())),
+            Some(("claude", "sess-tiled")),
+            "the tiled agent keeps its resume metadata"
+        );
     }
 
     // The control sockets grant command execution as the user, so the state

@@ -2103,6 +2103,60 @@ fn tab_completes_the_typed_at_in_place_with_a_pane_name() {
     assert_eq!(app.commander.as_ref().unwrap().draft, "@build");
 }
 
+fn add_floating_shell(app: &mut App) -> PaneId {
+    app.float_pane(crate::app::FloatingPaneRequest {
+        target: None,
+        width: Some(20),
+        height: Some(6),
+        x: Some(2),
+        y: Some(2),
+        title: None,
+        focus: false,
+        command: Some(vec![crate::platform::resolve_shell(&app.config.shell)]),
+    })
+    .expect("the floating shell spawns")
+    .pane
+}
+
+#[test]
+fn picker_candidates_include_floating_panes_scoped_and_unscoped() {
+    let _env = crate::persist::test_env("commander-floating-candidates");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let tiled = app.layout().focus;
+    let floating = add_floating_shell(&mut app);
+    app.set_agent_name(tiled, Some("build"));
+    app.set_agent_name(floating, Some("floaty"));
+    app.open_commander();
+
+    // Unscoped: Tab walks the renderer's pane order, which lists the floating
+    // pane after the tab's tiled leaves.
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@".into();
+    commander.cursor = 1;
+    app.refresh_commander_preview();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "@build");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        "@floaty",
+        "the floating pane is a selectable candidate"
+    );
+
+    // Scoped: the tab's last candidate is its floating pane.
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@tab:1/pane:".into();
+    commander.cursor = commander.draft.len();
+    app.refresh_commander_preview();
+    app.commander_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        "@tab:1/pane:floaty",
+        "a scoped picker reaches the floating pane too"
+    );
+}
+
 #[test]
 fn split_actions_target_exact_panes_and_cannot_repeat_on_enter() {
     let _env = crate::persist::test_env("commander-split-actions");
@@ -2188,6 +2242,60 @@ fn split_action_rejects_extra_text_before_mutating_layout() {
         .as_ref()
         .unwrap()
         .contains("no message"));
+}
+
+/// A commander split that names a floating pane is a tiled-only action: it must
+/// not split the last tiled focus or report the floating pane as split.
+#[test]
+fn split_action_rejects_a_floating_pane_without_changing_the_tab() {
+    let _env = crate::persist::test_env("commander-split-floating");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let tiled = app.layout().focus;
+    let floating = add_floating_shell(&mut app);
+    let tree = serde_json::to_vec(&app.layout().to_tree()).unwrap();
+    let panes = app.panes.len();
+    let focus = app.layout().focus;
+    let notice = app.catalog.floating_tiled_only;
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("@p{}:sv", floating.0);
+    commander.cursor = commander.draft.len();
+    app.toast = None;
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(app.panes.len(), panes, "no pane is created");
+    assert_eq!(
+        serde_json::to_vec(&app.layout().to_tree()).unwrap(),
+        tree,
+        "the tiled tree is unchanged"
+    );
+    assert_eq!(app.layout().focus, focus, "focus does not move to a tile");
+    assert_eq!(app.layout().leaves(), vec![tiled]);
+    assert_eq!(
+        app.toast.as_ref().map(|(text, _)| text.as_str()),
+        Some(notice),
+        "the tiled-only notice explains the rejection"
+    );
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_ref()
+        .unwrap()
+        .contains("could not be split"));
+
+    // The same action still splits a tiled pane.
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("@p{}:sv", tiled.0);
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.layout().leaves().len(),
+        2,
+        "the tiled pane still splits"
+    );
 }
 
 #[test]

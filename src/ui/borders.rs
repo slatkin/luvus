@@ -23,8 +23,13 @@ fn divider_touches(rect: Rect, d: &crate::layout::Divider) -> bool {
     }
 }
 
-/// Draw a native ratatui border around every pane. The focused pane (or a pane
-/// touched by the hovered divider) uses the brighter `border_focus` colour.
+/// Draw a native ratatui border around every pane in `rects`. The focused pane
+/// (or a pane touched by the hovered divider) uses the brighter `border_focus`
+/// colour.
+///
+/// The caller decides which panes are bordered: a lone tiled pane is drawn
+/// without one, while every floating pane is drawn with one even when it is the
+/// only rect passed here.
 pub(super) fn render_pane_borders(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -32,9 +37,6 @@ pub(super) fn render_pane_borders(
     hover: Option<&crate::layout::Divider>,
     t: &Theme,
 ) {
-    if rects.len() < 2 {
-        return;
-    }
     for (id, rect) in rects {
         if rect.width < 2 || rect.height < 2 {
             continue;

@@ -33,7 +33,7 @@ Then any of these tables, each declaring an argv `command` (a list, run as-is, c
 - **`[[startup]]`** `command` — run once when the session is up and the socket is listening (and on enable). Dock rows and bar content are **not** persisted, so this is how you repaint them after a restart.
 - **`[[events]]`** `on`, `command` — run when a luvus event fires. Valid `on` values include `workspace.created`/`closed`, `tab.created`/`closed`/`moved`, `pane.created`/`closed`/`forked`/`moved`, `pane.agent_status_changed`, `agent.hook`, and the `task.*`/`lease.*` events (see `KNOWN_EVENTS` in `src/module/manifest.rs` for the full set — an unknown `on` is a hard manifest error).
 - **`[[actions]]`** `id`, `title`, `command`, optional `contexts` — a runnable action. With `contexts = ["pane"|"workspace"|"node"|"agent"|"tab"]` it also appears in that right-click menu, acting on **what was clicked**. Without `contexts` it is CLI-only (`luvus module run <id> <action>`). Dock rows also invoke an action on click.
-- **`[[panes]]`** `id`, `title`, `command`, `placement` (`split` | `overlay` | `tab`) — a real pane running your command (`luvus module pane open <id> <entrypoint>`).
+- **`[[panes]]`** `id`, `title`, `command`, `placement` (`split` | `overlay` | `tab` | `floating`) — a real pane running your command (`luvus module pane open <id> <entrypoint>`). Floating panes also take optional integer `width`, `height`, `x` and `y`.
 - **`[[settings]]`** `key`, `title`, `type` (`bool` | `string` | `number` | `enum`), plus `default`, `options` (enum), `min`/`max`/`step` (number), `secret` (mask + hide the value). Rendered in Settings → Modules; values reach every command as env (below).
 - **`[worktree_provider]`** one optional fixed creation `command`, optional fixed `remove_command`, and optional `platforms`. The user selects the module id in `config.json` at `worktree.provider`; config cannot replace either command.
 
@@ -92,6 +92,27 @@ Run the `luvus` CLI from inside the command; it talks to the running server over
 **A right-click action**: an `[[actions]]` with `contexts = ["pane"]` (or workspace/node/agent/tab). It appears in that menu and runs against the clicked target's `LUVUS_*` env.
 
 **A pane**: a `[[panes]]` entry; open it with `luvus module pane open <module-id> <entrypoint>`.
+
+**A floating prompt** (a "modal" panel): a `[[panes]]` entry with `placement = "floating"` that runs a short-lived prompt command, then exits. It takes focus while open, closes on exit, and returns focus to the previous pane.
+
+```toml
+id = "you.prompt"
+name = "Prompt"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[panes]]
+id = "prompt"
+title = "Pick a branch"
+placement = "floating"
+width = 60
+height = 8
+x = 10
+y = 3
+command = ["sh", "prompt.sh"]
+```
+
+`width` and `height` are the outer size including the border; omitted values default to half the tab width and a quarter of the tab height. Omitted `x`/`y` cascade from (4, 2) in steps of 4 and 2, restarting at 4 or 2 when the next position would pass the edge. Sizes below the 3x3 minimum are rejected before the command starts; larger sizes are clamped to the pane area. The entry `title` is the top border. Floating placement works only on tabs that hold panes (not Git, ORCH or Mission Control tabs). A manifest entry `placement` applies without a flag only when it is `floating`; a `tab`, `overlay`, `split` or other value only documents the intended placement, and the pane opens as a split as before. An explicit `--placement` always wins.
 
 ## Test loop
 

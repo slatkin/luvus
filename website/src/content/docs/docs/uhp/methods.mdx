@@ -47,6 +47,13 @@ One request per connection, newline-terminated, and one JSON reply:
 ← {"id":"1","result":{"type":"ok","pane":"7"}}
 ```
 
+A floating pane uses its own creation method:
+
+```json
+→ {"id":"2","method":"pane.float","params":{"pane":"7","width":40,"height":12,"title":"Review","command":["htop"]}}
+← {"id":"2","result":{"type":"pane","pane":"11","workspace":"0","tab":"2"}}
+```
+
 `auth` is optional. It carries a delegated token when a harness should have
 less authority than the local account:
 
@@ -87,7 +94,7 @@ Luvus release number.
 | workspaces | `workspace.list` · `workspace.get` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.move` · `workspace.move_block` · `workspace.report_metadata` · `workspace.close` |
 | tabs | `tab.list` · `tab.get` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
 | runtime and agents | `session.snapshot` · `agent.start` · `agent.prompt` · `agent.wait` · `events.subscribe` |
-| panes | `pane.list` · `pane.get` · `pane.current` · `pane.layout` · `pane.neighbor` · `pane.edges` · `pane.split` · `pane.move` · `pane.swap` · `pane.transpose` · `pane.focus` · `pane.focus_direction` · `pane.resize` · `pane.zoom` · `pane.rename` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
+| panes | `pane.list` · `pane.get` · `pane.current` · `pane.layout` · `pane.neighbor` · `pane.edges` · `pane.split` · `pane.float` · `pane.move` · `pane.swap` · `pane.transpose` · `pane.focus` · `pane.focus_direction` · `pane.resize` · `pane.zoom` · `pane.rename` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
 | layouts | `layout.export` · `layout.apply` · `layout.set_split_ratio` |
 | agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.start` · `agent.prompt` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.release_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
@@ -238,6 +245,11 @@ position that changes when workspaces are reordered or an earlier one closes,
 also published by `workspace.list` and `workspace.get`. Filter or correlate on
 `workspace_id` when the result has to survive those changes.
 
+`agent.list` includes agents that run in floating panes. Each such row is a full
+agent row, addressed by its pane ID like any other. A lookup by agent kind that
+matches one tiled and one floating agent is ambiguous, the same as two matches
+in tiled panes.
+
 `agent.list` rows and the `agent.get` result include `agent_session_title`, the
 same live session title that `session.snapshot` reports for that pane. It is a
 single line of at most 160 characters, or `null` when no title is available.
@@ -359,7 +371,10 @@ task and report `delivered` after the prompt reaches the pane input queue.
 
 `agent.list` returns the stable `workspace_id` and process-lifetime
 `terminal_id` on each live agent row so clients can construct this target
-without consulting terminal-backend methods.
+without consulting terminal-backend methods. Active-agent choices include
+agents in floating panes. Orchestration reuses a floating active agent in place,
+but a new worker pane belongs to the tab's tiled tree and is never split from a
+floating pane.
 
 The read-only methods require the `read` scope. Every mutating automation
 method requires `orchestration`. A remote client should discover this contract
@@ -411,7 +426,9 @@ not change focus:
 
 `pane.layout` returns the pane rectangle in a normalized 10,000 by 10,000
 logical area. Headless clients therefore receive deterministic geometry that
-does not depend on the latest attached terminal size. `pane.edges` reports
+does not depend on the latest attached terminal size. For a floating pane it
+returns `floating:true`, the stored outer `rect` in cells, and the tiled tree;
+the tree never contains floating panes. `pane.edges` reports
 which outer edges the pane touches. Directional queries use the same geometric
 selection as the TUI. `pane.split` takes optional `direction`: omitted or `"auto"` splits the longer
 physical side of the target pane using the last interactive client size. Cell
@@ -434,13 +451,37 @@ Luvus retries the target workspace root and then the home directory.
 side-by-side split and now gets an error. Send `"right"` explicitly, or omit the
 field, to keep that behavior.
 
-`layout.export` returns the complete binary split tree and focused pane.
-`layout.apply` accepts that tree plus an optional focus. It succeeds only when
-the tree contains every current pane in the target tab exactly once. It never
-spawns, closes, or recreates a pane, so PTYs, scrollback, process identity, and
-agent sessions survive. Duplicate, missing, foreign, invalid-axis,
-invalid-ratio, and over-deep trees are rejected before mutation. Dashboard tabs
-do not have mutable pane layouts.
+`pane.float` creates a pane above the tiled tree in the target pane's tab, or in
+the active tab when `pane` is omitted. It creates a workspace when none exists,
+like `pane.split`. All fields are optional: `width`, `height` (outer cells, each
+at least 3), `x`, `y` (outer cells relative to the pane area), `title` (border
+title of at most 64 characters), `focus` (boolean, default true), and `command`
+(non-empty argv array; the default shell when omitted). Invalid types, a size
+below 3, a title longer than 64 characters, an empty or non-string `command`, or
+a target in a Git, orchestration, or Mission Control tab return
+`invalid_request` before any pane is created. The result is
+`{type:"pane", pane, workspace, tab}`, with the same zero-based workspace and
+one-based tab as `pane.split`.
+
+`layout.export` returns the complete binary split tree and focused pane. The
+exported focus can be a floating pane, while the tree contains only tiled
+panes. `layout.apply` accepts that tree plus an optional focus. It succeeds only
+when the tree contains every current pane in the target tab exactly once. It
+never spawns, closes, or recreates a pane, so PTYs, scrollback, process
+identity, and agent sessions survive. It defaults an omitted focus to the tab's
+last focused tiled pane and rejects a `focus` or tree entry that names a
+floating pane with `invalid_request`. A naive `layout.export` to `layout.apply`
+round trip therefore fails when the exported focus is floating; omit `focus` or
+replace it with the ID of a tiled pane. Duplicate, missing, foreign,
+invalid-axis, invalid-ratio, and over-deep trees are rejected before mutation.
+Dashboard tabs do not have mutable pane layouts.
+
+`pane.split`, `pane.transpose`, `pane.swap`, `pane.move`, and `pane.resize`
+operate on the tiled tree. They return `invalid_request` with message
+`pane is floating` when the target or implicit focus is a floating pane.
+`pane.neighbor` and `pane.edges` answer for the tab's last focused tiled pane
+when the queried pane is floating, so directional queries never cross into
+floating geometry.
 
 `layout.set_split_ratio` takes a root-relative `path` of `"a"` and `"b"`
 steps and a ratio from 0 to 1. The live layout clamps the result to preserve the
@@ -540,7 +581,14 @@ resynchronization rules.
 `uhp.capabilities` negotiates the app-level automation surface and its
 limits. `session.snapshot` returns every workspace, tab, terminal pane, native
 view, stable terminal identity, root process, and agent state in one response.
-It includes the current event sequence, so a consumer can subscribe first and
+It includes floating panes. A floating pane row has `floating:true`, its outer
+`rect` (`x`, `y`, `width`, and `height` in cells), and `z`, where 0 is the top
+floating pane; `focused` is true when it holds focus. This is the live snapshot
+only: the saved session file excludes floating panes, so a restart restores
+tiled panes and tiled focus only. The terminal backend inventory also lists a
+floating pane's terminal, and that terminal can be observed and controlled
+through its validated identity. Luvus Web may omit floating panes. The snapshot
+includes the current event sequence, so a consumer can subscribe first and
 reconcile later events without a snapshot race. Neither method reads terminal
 text or starts a process.
 
@@ -794,7 +842,8 @@ Luvus during named-session handoff. Invalid or stale targets return a structured
 `mission.snapshot` returns the dashboard's live and resumable agent rows,
 states, locations, structured usage counters, aggregate tokens and cost, and a
 read-only `automation` health object with definition, scheduled, live, review,
-failed, and next-run counts/deadline.
+failed, and next-run counts/deadline. Rows include agents in floating panes, and
+their usage is read like any other live row.
 It deliberately omits native session IDs and blocked-output snippets. It does
 not open Mission Control or change focus.
 
@@ -892,7 +941,8 @@ Public tab positions are 1-based.
 
 `pane.move` resolves an explicit pane anywhere, then keeps the move inside that
 pane's workspace. The pane's process and PTY stay alive, focus follows it, and
-an empty source tab is removed. `tab` must name another ordinary pane tab;
+an empty source tab is removed. A floating pane cannot be moved: `pane.move`
+returns `invalid_request` with message `pane is floating`. `tab` must name another ordinary pane tab;
 Git, orchestration, and Mission Control dashboards are not valid destinations.
 Pass exactly one of `tab` or `new_tab:true`. The result's `workspace` is the
 same zero-based workspace index used by the other workspace API results; its
@@ -919,6 +969,9 @@ the result to the active tab. The CLI follows the same default and accepts
 `luvus pane list --current-tab` for the narrow view. Each row includes a
 zero-based `workspace`, stable `workspace_id`, one-based `tab`, and stable
 `tab_id`; the boolean `focused` is true only for the globally focused pane.
+Every pane row includes `floating`. A floating pane also includes `rect` with
+`x`, `y`, `width`, and `height` in cells, and `z`, where 0 is the top floating
+pane. Tiled panes have `floating:false` and omit `rect` and `z`.
 `all_tabs` must be a boolean. `pane.status` resolves any known pane. Both
 methods include read-only history fields in their result rows:
 
@@ -979,7 +1032,9 @@ remain available for compatibility.
 
 `target` is a live alias, numeric pane ID, or a unique agent kind. Luvus uses
 the agent's native fork command and creates the sibling to the right of the
-source pane in that pane's own workspace and tab. The parent stays running.
+source pane in that pane's own workspace and tab. The parent stays running. An
+agent in a floating pane cannot be forked: `agent.fork` returns
+`invalid_request` with message `pane is floating`.
 `name` optionally assigns the new fork a live alias. `focus` defaults to `true`;
 when false, the current workspace, tab, pane focus, and zoom state are preserved.
 
@@ -1327,6 +1382,9 @@ with future additive names. Register the returned `documents` by `$id` and
 resolve an entry from the catalog document, for example
 `https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json#/properties/pane.agent_status_changed`;
 do not detach a fragment that contains a local `$ref` from its root document.
+
+Floating panes emit the same `pane.created`, `pane.closed`, and other pane
+events as tiled panes. Ordinary focus emits no pane event for either placement.
 
 `terminal.backend.events.subscribe` uses the same stream framing but filters to
 `terminal.*` events. Its acknowledgment includes the current sequence and queue

@@ -1,7 +1,7 @@
 //! Core JSON API handlers.
 
-use super::params::*;
 use super::*;
+use super::{params::*, projection::*};
 
 impl App {
     pub(super) fn api_ping(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -164,10 +164,10 @@ impl App {
                 };
                 let panes: Vec<Value> = tab
                     .layout
-                    .leaves()
+                    .all_panes()
                     .into_iter()
                     .map(|pane_id| {
-                        if let Some(pane) = self.panes.get(&pane_id) {
+                        let mut row = if let Some(pane) = self.panes.get(&pane_id) {
                             let runtime = pane.terminal_runtime();
                             let status = self.status.get(&pane_id);
                             let agent_session_title = self.agent_session_title(pane_id);
@@ -200,7 +200,9 @@ impl App {
                                     && tab_index == workspace.active_tab
                                     && tab.layout.focus == pane_id,
                             })
-                        }
+                        };
+                        insert_placement(&mut row, &tab.layout, pane_id);
+                        row
                     })
                     .collect();
                 tabs.push(json!({

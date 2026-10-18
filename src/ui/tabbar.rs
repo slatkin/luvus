@@ -512,6 +512,7 @@ mod width_tests {
                 orch: false,
                 mission: false,
                 name: None,
+                floating: crate::app::FloatingState::default(),
             });
         }
         app.workspaces[0].active_tab = 27;

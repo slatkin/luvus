@@ -254,6 +254,20 @@ impl Cmd {
         }
     }
 
+    /// Commands that act on the tiled tree. A floating pane has no tree
+    /// geometry, so these are rejected with a notice instead of acting on
+    /// the tile behind it.
+    pub fn requires_tiled(self) -> bool {
+        matches!(
+            self,
+            Cmd::SplitRight
+                | Cmd::SplitDown
+                | Cmd::SplitAuto
+                | Cmd::TransposePane
+                | Cmd::ResizeMode
+        )
+    }
+
     /// Human label shown in the Keys list / cheat-sheet, in the active language
     /// (docs/21). `id()` stays the stable English key; only this display label
     /// is localized.
@@ -962,6 +976,21 @@ impl App {
 
     /// Run a prefix command.
     pub fn run_cmd(&mut self, cmd: Cmd) {
+        // Tiled-only commands explain the rejection instead of quietly
+        // editing the tile behind a floating pane. Focus resolves tolerantly:
+        // a server can stay alive with no workspace.
+        let focus = self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+            .map(|tab| tab.layout.focus);
+        if cmd.requires_tiled() {
+            if let Some(pane) = focus {
+                if self.reject_tiled_only_floating(pane) {
+                    return;
+                }
+            }
+        }
         match cmd {
             Cmd::FocusLeft => self.focus_dir(Dir::Left),
             Cmd::FocusDown => self.focus_dir(Dir::Down),
@@ -975,16 +1004,7 @@ impl App {
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
             Cmd::SplitAuto => self.split_auto(),
-            Cmd::TransposePane => {
-                if let Some(pane) = self
-                    .workspaces
-                    .get(self.active_ws)
-                    .and_then(|ws| ws.tabs.get(ws.active_tab))
-                    .map(|tab| tab.layout.focus)
-                {
-                    self.transpose_pane(pane);
-                }
-            }
+            Cmd::TransposePane => self.transpose_focused_pane(),
             // Fork the focused agent pane's session into a new pane (no-op if it
             // isn't a fork-capable agent).
             Cmd::ForkSession => {
@@ -1056,6 +1076,18 @@ impl App {
         }
     }
 
+    /// Transpose the focused tiled pane's nearest split without moving focus.
+    fn transpose_focused_pane(&mut self) {
+        if let Some(pane) = self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|ws| ws.tabs.get(ws.active_tab))
+            .map(|tab| tab.layout.focus)
+        {
+            self.transpose_pane(pane);
+        }
+    }
+
     /// Jump focus to the next agent pane in `state`, cycling in the same
     /// workspace → tab → pane order as the AGENTS sidebar. Cross-workspace
     /// jumps flow through [`focus_pane_global`] so previous-focus navigation
@@ -1068,7 +1100,7 @@ impl App {
         let mut matches = Vec::new();
         for ws in &self.workspaces {
             for tab in &ws.tabs {
-                for id in tab.layout.leaves() {
+                for id in tab.layout.all_panes() {
                     if let Some(status) = self.status.get(&id) {
                         let is_agent = self.manifests.is_agent(&status.agent)
                             || status.agent_session.is_some();
@@ -1764,6 +1796,73 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert_eq!(app.ws().tabs.len(), tabs + 1, "F12 prefix opens a tab");
+    }
+
+    #[test]
+    fn prefix_split_and_other_tiled_only_commands_notice_a_floating_pane() {
+        use crate::event::AppEvent;
+
+        let _env = crate::persist::test_env("floating-tiled-only-keys");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(FloatingPaneRequest {
+                target: None,
+                width: None,
+                height: None,
+                x: None,
+                y: None,
+                title: None,
+                focus: true,
+                command: None,
+            })
+            .unwrap()
+            .pane;
+        assert_eq!(app.layout().focus, floating);
+        let leaves = app.layout().leaves();
+        let panes = app.panes.len();
+        let notice = app.catalog.floating_tiled_only;
+
+        // The real prefix binding: Ctrl+Space then `v` (split right).
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.mode, Mode::Prefix);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.layout().leaves(),
+            leaves,
+            "prefix split creates no tile"
+        );
+        assert_eq!(app.panes.len(), panes, "prefix split spawns no pane");
+        assert_eq!(app.layout().focus, floating);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some(notice),
+            "prefix split explains the floating pane"
+        );
+
+        for cmd in [
+            Cmd::SplitDown,
+            Cmd::SplitAuto,
+            Cmd::TransposePane,
+            Cmd::ResizeMode,
+        ] {
+            app.toast = None;
+            app.run_cmd(cmd);
+            assert_eq!(app.layout().leaves(), leaves, "{cmd:?} creates no tile");
+            assert_eq!(app.layout().focus, floating, "{cmd:?} keeps focus");
+            assert_eq!(app.mode, Mode::Normal, "{cmd:?} enters no mode");
+            assert_eq!(
+                app.toast.as_ref().map(|(text, _)| text.as_str()),
+                Some(notice),
+                "{cmd:?} shows the notice"
+            );
+        }
     }
 
     #[test]

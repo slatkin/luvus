@@ -28,10 +28,12 @@ type = "bool"
 default = true
 
 # ── The presenter pane ───────────────────────────────────────────────────────
-# A full-screen Markdown slideshow, so it opens as its own tab rather than
-# splitting the pane you invoked it from. `python3 deck.py` runs in the module
-# directory; it resolves the deck file from the setting + the node's folder, and
-# falls back to the bundled sample.md so it works the moment you enable it.
+# A full-screen Markdown slideshow intended as its own tab. The entry placement
+# only documents that intent: an open without `--placement tab` (including the
+# action below) splits the pane you invoked it from. `python3 deck.py` runs in
+# the module directory; it resolves the deck file from the setting + the node's
+# folder, and falls back to the bundled sample.md so it works the moment you
+# enable it.
 
 [[panes]]
 id = "present"

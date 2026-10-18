@@ -33,5 +33,42 @@ class TransposePaneIdTests(unittest.TestCase):
                 self.assertEqual(re.fullmatch(pattern, target) is not None, expected)
 
 
+class PaneFloatTests(unittest.TestCase):
+    """Keep pane.float fixtures and the consumer contract in step."""
+
+    def setUp(self):
+        schema = json.loads((PACKAGE / "schema/request.schema.json").read_text())
+        self.methods = set(schema["properties"]["method"]["enum"])
+        self.params = schema["$defs"]["paneFloatParams"]
+
+    def assertValid(self, params, expected):
+        request = {"id": "float", "method": "pane.float", "params": params}
+        self.assertEqual(valid_global_request(request, self.methods), expected)
+
+    def test_geometry_and_bounded_fields(self):
+        self.assertValid({"pane": "7", "width": 40, "height": 12,
+                          "x": 4, "y": 2, "title": "Review",
+                          "focus": False, "command": ["htop"]}, True)
+        self.assertValid({}, True)
+        self.assertValid({"pane": 7, "width": 3, "height": 3, "x": 0, "y": 0}, True)
+        for key in ("width", "height"):
+            minimum = self.params["properties"][key]["minimum"]
+            self.assertValid({key: minimum}, True)
+            self.assertValid({key: minimum - 1}, False)
+        self.assertValid({"width": 65536}, False)
+        self.assertValid({"x": -1}, False)
+        title_max = self.params["properties"]["title"]["maxLength"]
+        self.assertValid({"title": "t" * title_max}, True)
+        self.assertValid({"title": "t" * (title_max + 1)}, False)
+
+    def test_shape_is_strict(self):
+        for params in ({"pane": "7", "depth": 2}, {"title": 7},
+                       {"focus": "yes"}, {"command": "htop"},
+                       {"command": []}, {"command": [""]},
+                       {"width": "wide"}, {"pane": True}):
+            with self.subTest(params=params):
+                self.assertValid(params, False)
+
+
 if __name__ == "__main__":
     unittest.main()

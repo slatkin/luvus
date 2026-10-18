@@ -2157,6 +2157,85 @@ mod tests {
     }
 
     #[test]
+    fn active_agent_target_can_be_a_floating_agent() {
+        let _env = crate::persist::test_env("automation-floating-target");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let floating = app
+            .float_pane(crate::app::FloatingPaneRequest {
+                target: None,
+                width: Some(20),
+                height: Some(6),
+                x: Some(2),
+                y: Some(2),
+                title: None,
+                focus: false,
+                command: Some(vec![crate::platform::resolve_shell(&app.config.shell)]),
+            })
+            .unwrap()
+            .pane;
+        let terminal_id = app.panes[&floating]
+            .terminal_runtime()
+            .expect("the floating pane has a live terminal")
+            .terminal_id
+            .clone();
+        let status = app.status.get_mut(&floating).unwrap();
+        status.agent = "codex".into();
+        status.state = State::Idle;
+        status.agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "native-floating".into(),
+        });
+        let workspace_id = app
+            .workspace_of_pane(floating)
+            .expect("a floating pane has an owner workspace")
+            .id
+            .clone();
+        let mut target = crate::automation::AutomationTarget::ActiveAgent {
+            pane_id: floating.0,
+            terminal_id: terminal_id.clone(),
+            if_busy: crate::automation::ActiveAgentBusyPolicy::Wait,
+            durable: None,
+        };
+        let mut task = crate::automation::TaskTemplate {
+            title: "continue review".into(),
+            prompt: ":".into(),
+            agent_id: "codex".into(),
+            workspace_id: workspace_id.clone(),
+            mode: crate::orch::TaskWorkerMode::Workspace,
+            access: crate::automation::AutomationAccess::Workspace,
+            paths: Vec::new(),
+            gate: None,
+        };
+
+        app.prepare_active_agent_target(&mut target, &mut task)
+            .expect("a floating agent is a valid active target");
+        let crate::automation::AutomationTarget::ActiveAgent {
+            pane_id, durable, ..
+        } = &target
+        else {
+            unreachable!();
+        };
+        assert_eq!(*pane_id, floating.0, "the binding keeps the pane identity");
+        let durable = durable
+            .as_ref()
+            .expect("codex upgrades to a durable target");
+        assert_eq!(durable.workspace_id, workspace_id);
+        assert_eq!(durable.native_session_id, "native-floating");
+        assert_eq!(
+            app.validate_active_agent_target(&target, &task).unwrap().0,
+            floating
+        );
+
+        app.close_pane(floating);
+
+        let error = app
+            .validate_active_agent_target(&target, &task)
+            .unwrap_err();
+        assert_eq!(error.0, "stale_target");
+    }
+
+    #[test]
     fn active_agent_run_delivers_without_creating_an_orch_worker() {
         let _env = crate::persist::test_env("automation-existing-delivery");
         let (tx, _rx) = std::sync::mpsc::channel();

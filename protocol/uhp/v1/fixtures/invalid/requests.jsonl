@@ -45,3 +45,5 @@
 {"id":"transpose-extra","method":"pane.transpose","params":{"pane":"7","all":true}}
 {"id":"transpose-bool","method":"pane.transpose","params":{"pane":true}}
 {"id":"transpose-out-of-range-pane","method":"pane.transpose","params":{"pane":"4294967296"}}
+{"id":"bad-pane-float-size","method":"pane.float","params":{"width":2}}
+{"id":"bad-pane-float-extra","method":"pane.float","params":{"pane":"7","depth":2}}

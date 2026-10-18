@@ -1448,8 +1448,7 @@ impl App {
                 .find_map(|(wi, workspace)| {
                     workspace.tabs.iter().enumerate().find_map(|(ti, tab)| {
                         tab.layout
-                            .leaves()
-                            .contains(pane)
+                            .contains(*pane)
                             .then(|| (wi, ti, workspace.name.clone()))
                     })
                 });

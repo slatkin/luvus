@@ -3125,15 +3125,7 @@ impl App {
             self.close_tab(*i);
             return;
         }
-        // The focused pane's ✕ button closes the active pane.
-        if self.pane_close_rect.is_some_and(hit) {
-            self.close_pane(self.layout().focus);
-            return;
-        }
-        // Its ⤢ button toggles zoom — the touch equivalent of `Ctrl+Space z`, so
-        // a split can be expanded to fullscreen on a phone (docs/18).
-        if self.pane_zoom_rect.is_some_and(hit) {
-            self.zoomed = !self.zoomed;
+        if self.press_focused_pane_chrome(c, r) {
             return;
         }
         // Tab-bar scroll arrows: step to the previous / next tab.
@@ -4029,12 +4021,62 @@ impl App {
         }
     }
 
+    /// The pane whose drawn rect is topmost at a cell. `pane_rects` leads with
+    /// the floating stack from the top down, then the tiled layer, so the first
+    /// hit is the pane the user sees.
+    fn topmost_pane_at(&self, x: u16, y: u16) -> Option<PaneId> {
+        self.pane_rects
+            .iter()
+            .find(|(_, rect)| x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom())
+            .map(|(id, _)| *id)
+    }
+
+    /// The focused pane's ✕ and ⤢ buttons. Pane chrome belongs to the topmost
+    /// pane: a floating pane can cover the focused tiled pane's buttons, and
+    /// covered chrome must not fire, so the press falls through to focus the
+    /// pane that is actually on top. Returns true when the press was consumed.
+    fn press_focused_pane_chrome(&mut self, c: u16, r: u16) -> bool {
+        let hit = |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
+        let chrome_visible = self.topmost_pane_at(c, r) == Some(self.layout().focus);
+        // The ✕ button closes the active pane.
+        if chrome_visible && self.pane_close_rect.is_some_and(hit) {
+            self.close_pane(self.layout().focus);
+            return true;
+        }
+        // The ⤢ button toggles zoom — the touch equivalent of `Ctrl+Space z`, so
+        // a split can be expanded to fullscreen on a phone (docs/18).
+        if chrome_visible && self.pane_zoom_rect.is_some_and(hit) {
+            self.zoomed = !self.zoomed;
+            return true;
+        }
+        false
+    }
+
     /// `pub(super)` so the resize hit-test in `app` can share this exact rule:
     /// a cell inside a pane's content belongs to the pane, never to a divider.
+    ///
+    /// A floating pane covers its border as well as its content: when the
+    /// topmost pane at the cell was drawn floating, only that pane's content may
+    /// own the cell. A press on its border belongs to no pane and must not reach
+    /// the tiled pane drawn underneath.
     pub(super) fn pane_content_at(&self, x: u16, y: u16) -> Option<(PaneId, Rect)> {
+        let hit = |r: &Rect| x >= r.x && x < r.right() && y >= r.y && y < r.bottom();
+        // `pane_rects` leads with the floating panes the renderer actually drew,
+        // so an index inside that prefix is the floating stack. The layout is not
+        // consulted here: it can hold floating panes the frame did not draw.
+        if let Some(index) = self.pane_rects.iter().position(|(_, rect)| hit(rect)) {
+            let topmost = self.pane_rects[index].0;
+            if index < self.pane_floating_count {
+                return self
+                    .pane_content_rects
+                    .iter()
+                    .find(|(id, r)| *id == topmost && hit(r))
+                    .map(|(id, r)| (*id, *r));
+            }
+        }
         self.pane_content_rects
             .iter()
-            .find(|(_, r)| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+            .find(|(_, r)| hit(r))
             .map(|(id, r)| (*id, *r))
     }
 
@@ -11381,5 +11423,236 @@ mod link_click_tests {
         assert_eq!(app.selection_text().as_deref(), Some("alpha"));
         assert!(app.pending_clipboard.is_none());
         assert!(app.mouse_grab.is_none());
+    }
+    fn floating_pane(
+        app: &mut App,
+        (x, y, width, height): (u16, u16, u16, u16),
+        focus: bool,
+    ) -> crate::ids::PaneId {
+        app.float_pane(crate::app::FloatingPaneRequest::test(
+            None,
+            Some((x, y, width, height)),
+            None,
+            focus,
+            None,
+        ))
+        .expect("floating pane is created")
+        .pane
+    }
+
+    fn pane_rect(app: &App, pane: crate::ids::PaneId) -> Rect {
+        app.pane_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane is a hit target this frame")
+    }
+
+    fn pane_content_rect(app: &App, pane: crate::ids::PaneId) -> Rect {
+        app.pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane has content geometry")
+    }
+
+    /// A click inside a floating pane focuses it and starts no selection in the
+    /// tiled pane drawn beneath it. Its border is covered chrome: a press there
+    /// focuses the floating pane but owns no content cell.
+    #[test]
+    fn click_on_a_floating_pane_does_not_reach_the_tile_below() {
+        let _env = crate::persist::test_env("floating-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let tiled = app.layout().focus;
+        let floating = floating_pane(&mut app, (10, 4, 40, 8), false);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.layout().focus, tiled, "no-focus keeps the tiled pane");
+
+        // The tiled pane tracks the mouse, so a click leaking through the
+        // floating pane would be observable.
+        let (tiled_tx, tiled_rx) = std::sync::mpsc::channel();
+        {
+            let pane = app.panes.get_mut(&tiled).unwrap();
+            pane.engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b[?1002h\x1b[?1006h");
+            pane.replace_input_sender_for_test(tiled_tx);
+        }
+
+        let content = pane_content_rect(&app, floating);
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            (content.x + 2, content.y + 1),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.layout().focus,
+            floating,
+            "the click focuses the floating pane"
+        );
+        assert_eq!(
+            app.selection.map(|selection| selection.pane),
+            Some(floating),
+            "the floating pane owns the press, not the tile below"
+        );
+
+        // A border cell belongs to the floating pane, not to the tiled content
+        // it covers.
+        app.selection = None;
+        let rect = pane_rect(&app, floating);
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            (rect.x + 2, rect.y),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.layout().focus, floating);
+        assert!(
+            app.selection.is_none(),
+            "a covered border cell starts no selection"
+        );
+        assert!(
+            tiled_rx.try_recv().is_err(),
+            "the covered mouse-tracking tile receives nothing"
+        );
+    }
+
+    /// Right-clicking a floating pane opens its menu, and a covered tiled cell
+    /// resolves to the floating pane on top rather than the tile below.
+    #[test]
+    fn right_click_on_a_floating_pane_opens_its_menu() {
+        let _env = crate::persist::test_env("floating-pane-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let floating = floating_pane(&mut app, (10, 4, 40, 8), false);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let content = pane_content_rect(&app, floating);
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            (content.x + 2, content.y + 1),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.pane_menu.as_ref().map(|menu| menu.pane),
+            Some(floating),
+            "the floating pane opens its own menu"
+        );
+
+        app.pane_menu = None;
+        let rect = pane_rect(&app, floating);
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            (rect.x + 2, rect.y),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.pane_menu.as_ref().map(|menu| menu.pane),
+            Some(floating),
+            "a covered tiled cell opens the top pane's menu"
+        );
+    }
+
+    /// A click on a tiled cell no floating pane covers focuses the tiled pane and
+    /// leaves the floating stack alone.
+    #[test]
+    fn click_on_a_visible_tiled_area_focuses_the_tiled_pane() {
+        let _env = crate::persist::test_env("floating-click-tiled");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let tiled = app.layout().focus;
+        let floating = floating_pane(&mut app, (10, 4, 40, 8), false);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let stack = app.layout().floating_rects();
+
+        let content = pane_content_rect(&app, tiled);
+        let rect = pane_rect(&app, floating);
+        let at = (content.x + 2, rect.bottom() + 1);
+        assert!(at.1 < content.bottom(), "the cell is visible tiled content");
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+
+        assert_eq!(app.layout().focus, tiled, "the tiled pane takes the press");
+        assert_eq!(
+            app.selection.map(|selection| selection.pane),
+            Some(tiled),
+            "the visible tiled cell owns the press"
+        );
+        assert_eq!(
+            app.layout().floating_rects(),
+            stack,
+            "the floating stack keeps its order"
+        );
+    }
+
+    /// The wheel reaches the topmost pane only. A covered pane below receives
+    /// nothing, including when the cell is the top pane's border.
+    #[test]
+    fn scroll_goes_to_the_top_pane() {
+        let _env = crate::persist::test_env("floating-scroll-top");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let bottom = floating_pane(&mut app, (4, 4, 30, 10), false);
+        let top = floating_pane(&mut app, (8, 6, 30, 10), false);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Both panes track the mouse, so a forwarded wheel is observable.
+        let (bottom_tx, bottom_rx) = std::sync::mpsc::channel();
+        let (top_tx, top_rx) = std::sync::mpsc::channel();
+        for (pane, sender) in [(bottom, bottom_tx), (top, top_tx)] {
+            let pane = app.panes.get_mut(&pane).unwrap();
+            pane.engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b[?1002h\x1b[?1006h");
+            pane.replace_input_sender_for_test(sender);
+        }
+        let bytes = |rx: &std::sync::mpsc::Receiver<crate::terminal::pty::InputAction>| match rx
+            .try_recv()
+            .expect("the top pane receives the wheel")
+        {
+            crate::terminal::pty::InputAction::Bytes(bytes) => bytes,
+            crate::terminal::pty::InputAction::Submit { .. } => {
+                panic!("mouse input must use raw bytes")
+            }
+        };
+
+        let content = pane_content_rect(&app, top);
+        app.handle_event(mouse(
+            MouseEventKind::ScrollDown,
+            (content.x + 1, content.y + 1),
+            KeyModifiers::NONE,
+        ));
+        assert!(
+            bytes(&top_rx).starts_with(b"\x1b[<65;"),
+            "the topmost pane scrolls"
+        );
+        assert!(
+            bottom_rx.try_recv().is_err(),
+            "the covered pane below receives nothing"
+        );
+
+        // The top pane's border covers the lower pane's content too.
+        let rect = pane_rect(&app, top);
+        app.handle_event(mouse(
+            MouseEventKind::ScrollDown,
+            (rect.x + 1, rect.y),
+            KeyModifiers::NONE,
+        ));
+        assert!(
+            bottom_rx.try_recv().is_err(),
+            "a covered content cell receives nothing"
+        );
     }
 }

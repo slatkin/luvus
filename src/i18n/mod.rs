@@ -476,6 +476,12 @@ pub struct Catalog {
     pub cmd_resize_mode: &'static str,
     pub mode_resize: &'static str,
     pub mode_resize_hint: &'static str,
+    /// Toast when a tiled-only command (split, transpose, resize) runs while a
+    /// floating pane has focus.
+    pub floating_tiled_only: &'static str,
+    /// Short marker appended to a floating pane's label in pane pickers such as
+    /// the Commander preview, so it is recognizable before it is addressed.
+    pub floating_marker: &'static str,
     pub flow_commit: &'static str,
     pub flow_ahead: &'static str,
     pub flow_behind: &'static str,
@@ -925,6 +931,8 @@ pub static EN: Catalog = Catalog {
     cmd_resize_mode: "Resize panes",
     mode_resize: "RESIZE",
     mode_resize_hint: "Resize: arrows or hjkl · = equalize · Esc to exit",
+    floating_tiled_only: "Floating pane: split, transpose and resize need a tiled pane",
+    floating_marker: "floating",
     flow_commit: "commit",
     flow_ahead: "ahead",
     flow_behind: "behind",
@@ -1374,6 +1382,9 @@ static ES: Catalog = Catalog {
     cmd_resize_mode: "Redimensionar paneles",
     mode_resize: "REDIM.",
     mode_resize_hint: "Redimensionar: flechas o hjkl · = igualar · Esc para salir",
+    floating_tiled_only:
+        "Panel flotante: dividir, transponer y redimensionar requieren un panel en mosaico",
+    floating_marker: "flotante",
     flow_commit: "commit",
     flow_ahead: "adelante",
     flow_behind: "atrás",
@@ -1823,6 +1834,9 @@ static PT: Catalog = Catalog {
     cmd_resize_mode: "Redimensionar painéis",
     mode_resize: "REDIM.",
     mode_resize_hint: "Redimensionar: setas ou hjkl · = igualar · Esc para sair",
+    floating_tiled_only:
+        "Painel flutuante: dividir, transpor e redimensionar exigem um painel fixo",
+    floating_marker: "flutuante",
     flow_commit: "commit",
     flow_ahead: "à frente",
     flow_behind: "atrás",
@@ -2272,6 +2286,9 @@ static FR: Catalog = Catalog {
     cmd_resize_mode: "Redimensionner les volets",
     mode_resize: "REDIM.",
     mode_resize_hint: "Redimensionner : flèches ou hjkl · = égaliser · Échap pour quitter",
+    floating_tiled_only:
+        "Volet flottant : diviser, transposer et redimensionner exigent un volet fixe",
+    floating_marker: "flottant",
     flow_commit: "commit",
     flow_ahead: "en avance",
     flow_behind: "en retard",
@@ -2721,6 +2738,9 @@ static DE: Catalog = Catalog {
     cmd_resize_mode: "Bereiche anpassen",
     mode_resize: "GRÖSSE",
     mode_resize_hint: "Größe: Pfeile oder hjkl · = angleichen · Esc zum Beenden",
+    floating_tiled_only:
+        "Schwebender Bereich: Teilen, Tauschen und Größe ändern erfordern einen festen Bereich",
+    floating_marker: "schwebend",
     flow_commit: "Commit",
     flow_ahead: "voraus",
     flow_behind: "zurück",
@@ -3169,6 +3189,8 @@ static ID: Catalog = Catalog {
     cmd_resize_mode: "Ubah ukuran panel",
     mode_resize: "UBAH",
     mode_resize_hint: "Ubah ukuran: panah atau hjkl · = ratakan · Esc untuk keluar",
+    floating_tiled_only: "Panel mengambang: bagi, tukar, dan ubah ukuran memerlukan panel tetap",
+    floating_marker: "mengambang",
     flow_commit: "commit",
     flow_ahead: "di depan",
     flow_behind: "di belakang",
@@ -3617,6 +3639,8 @@ static ZH: Catalog = Catalog {
     cmd_resize_mode: "调整面板大小",
     mode_resize: "调整",
     mode_resize_hint: "调整大小：方向键或 hjkl · = 均分 · Esc 退出",
+    floating_tiled_only: "浮动面板：拆分、转置和调整大小需要平铺面板",
+    floating_marker: "浮动",
     flow_commit: "提交",
     flow_ahead: "领先",
     flow_behind: "落后",
@@ -4065,6 +4089,9 @@ static JA: Catalog = Catalog {
     cmd_resize_mode: "ペインのサイズ変更",
     mode_resize: "リサイズ",
     mode_resize_hint: "リサイズ：矢印または hjkl · = 均等 · Esc で終了",
+    floating_tiled_only:
+        "フローティングペイン：分割・入れ替え・サイズ変更にはタイルペインが必要です",
+    floating_marker: "フローティング",
     flow_commit: "コミット",
     flow_ahead: "先行",
     flow_behind: "遅れ",
@@ -4513,6 +4540,8 @@ static KO: Catalog = Catalog {
     cmd_resize_mode: "패널 크기 조정",
     mode_resize: "크기 조정",
     mode_resize_hint: "크기 조정: 화살표 또는 hjkl · = 균등 분배 · Esc로 종료",
+    floating_tiled_only: "플로팅 패널: 분할, 전환, 크기 조정은 타일 패널에서만 가능합니다",
+    floating_marker: "플로팅",
     flow_commit: "커밋",
     flow_ahead: "앞섬",
     flow_behind: "뒤처짐",

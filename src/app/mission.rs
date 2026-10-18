@@ -243,6 +243,7 @@ impl App {
             orch: false,
             mission: true,
             name: None,
+            floating: FloatingState::default(),
         });
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;
@@ -265,6 +266,7 @@ impl App {
     pub fn close_mission_tab(&mut self) {
         let at = self.ws().active_tab;
         if self.ws().tabs.get(at).is_some_and(Tab::is_mission) {
+            self.ws().tabs[at].debug_assert_no_floating("Mission Control");
             let ws = &mut self.workspaces[self.active_ws];
             ws.tabs.remove(at);
             if ws.tabs.is_empty() {
@@ -413,7 +415,7 @@ impl App {
             if !all && wi != workspace_index {
                 continue;
             }
-            for id in workspace.tabs.iter().flat_map(|tab| tab.layout.leaves()) {
+            for id in workspace.tabs.iter().flat_map(|tab| tab.layout.all_panes()) {
                 let Some(session) = self
                     .status
                     .get(&id)
@@ -473,10 +475,15 @@ impl App {
                 continue;
             }
             for (ti, tab) in workspace.tabs.iter().enumerate() {
-                let leaves = tab.layout.leaves();
-                for (pi, id) in leaves.iter().copied().enumerate() {
+                // Floating panes run agents too, so Mission Control lists them
+                // after the tab's tiled panes.
+                let pane_count = tab.layout.len();
+                let mut pane_index = 0;
+                tab.layout.for_each_pane(|id| {
+                    let pi = pane_index;
+                    pane_index += 1;
                     let Some(s) = self.status.get(&id) else {
-                        continue;
+                        return;
                     };
                     if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
                         let usage = s
@@ -500,8 +507,8 @@ impl App {
                         } else {
                             tab_name
                         };
-                        if leaves.len() > 1 {
-                            location.push_str(&format!(" p{}/{}", pi + 1, leaves.len()));
+                        if pane_count > 1 {
+                            location.push_str(&format!(" p{}/{}", pi + 1, pane_count));
                         }
                         if let Some(task) =
                             self.orch.tasks.iter().find(|t| t.assignee == Some(id.0))
@@ -518,7 +525,7 @@ impl App {
                             blocked_hint: s.blocked_hint.clone(),
                         });
                     }
-                }
+                });
             }
         }
         // Sort live agents by attention so the ones that need you float to the top
